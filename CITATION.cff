@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+title: "hexenium: H&E ↔ Xenium DAPI registration pipeline"
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+authors:
+  - family-names: Yang
+    given-names: Tracy
+    # orcid: "https://orcid.org/0000-0000-0000-0000"   # TODO
+  # Add co-authors here in the same shape.
+version: 0.1.0
+date-released: "2026-07-09"
+# doi: "10.5281/zenodo.PLACEHOLDER"                    # TODO after Zenodo mint
+url: "https://github.com/settylab/xenium-he-registration"
+repository-code: "https://github.com/settylab/xenium-he-registration"
+license: MIT
+keywords:
+  - xenium
+  - spatial-transcriptomics
+  - image-registration
+  - H&E
+  - VALIS
+  - HEST
+abstract: >-
+  hexenium is an installable pipeline for registering H&E
+  whole-slide images against the DAPI morphology channel of a
+  matched 10x Xenium in-situ transcriptomics run. It wraps VALIS
+  (via valis_hest) and HEST into a single CLI (`hexenium run …`)
+  with a resumable stage graph (he_preprocess → register → warp →
+  celltype → viz) and a YAML-driven config surface.

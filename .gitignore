@@ -1,0 +1,30 @@
+# Byte-compiled / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editors / OS junk
+.vscode/
+.idea/
+.DS_Store
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# scratch / experiment scratchpad
+scratch/
+
+# Slurm logs
+slurm-*.out
+logs/

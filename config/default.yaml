@@ -1,0 +1,234 @@
+# Default configuration for the hexenium pipeline.
+# Every value here can be overridden on the CLI (--key value) or by a
+# user YAML passed with --config user.yaml (only override what you need).
+
+# ----- I/O ----------------------------------------------------------
+sample_id: null                  # REQUIRED on CLI: e.g. SAMPLE1
+he_path: null                    # REQUIRED on CLI: full path to H&E (any name)
+xenium_bundle: null              # REQUIRED on CLI: dir holding morphology_focus/, transcripts.parquet, cell_boundaries.parquet, nucleus_boundaries.parquet
+# DAPI / morphology image used as the moving image for registration.
+# If null, derives from <xenium_bundle>/morphology_focus/morphology_focus_0000.ome.tif
+# (the standard Xenium output bundle layout). Set this explicitly when
+# your DAPI lives at a non-standard path (e.g. multichannel
+# `morphology_focus/ch0000_dapi.ome.tif` bundles).
+dapi_path: null
+output_root: null                # REQUIRED on CLI: parent directory for pipeline outputs
+force_rerun: false               # nuke per-stage sentinels and re-run
+
+# ----- Stage 0: VSI → OME-TIFF conversion --------------------------
+# Only fires when --he-path is a .vsi file (Olympus SlideScanner);
+# no-op for existing OME-TIFF inputs. Output lands at
+# <output_root>/<sample_id>/he_preprocessed/<sample_id>_he.ome.tif
+# and downstream stages consume that OME-TIFF instead of the raw VSI.
+# Spec matches 10x's Xenium Explorer image-conversion tutorial:
+# ZLIB or lossless JPEG 2000, pyramid scale 2, tile size 1024.
+he_preprocess:
+  tile_size: 1024                # Xenium Explorer requirement
+  compression: jpeg2000          # jpeg2000 (with level=100) or zlib
+  jpeg2000_level: 100            # 100 = lossless; <100 = LOSSY (rejected by Explorer)
+  pyramid_levels: 7              # matches the Xenium Explorer omeconvert.py default
+
+# ----- H&E preprocessing (input encoding side) ---------------------
+he:
+  # The pipeline symlinks the input H&E to "aligned_fullres_HE.ome.tif"
+  # inside the per-sample workdir before calling HEST. This sidesteps
+  # the hardcoded he_key='aligned_fullres_HE' in valis_hest's "Paul fix"
+  # without modifying HEST itself. Set false only if your H&E is
+  # already literally named aligned_fullres_HE.ome.tif.
+  symlink_to_canonical_name: true
+
+# ----- Registration mode (algorithm topology) ----------------------
+registration:
+  # `mode` default is `full_with_micro`: matches stock HEST
+  # `register_dapi_he(micro_reg=True)` — the fullest transform stack.
+  # `rigid_only` and `rigid_nonrigid` remain available via `--mode` for
+  # diagnostic sweeps and can be preferable on some samples.
+  # `rigid_only`       — just rigid; fastest.
+  # `rigid_nonrigid`   — rigid + non-rigid solve at max_processed_image_dim_px.
+  # `full_with_micro`  — rigid + non-rigid + micro-registration refinement.
+  #                      Matches stock HEST `register_dapi_he(micro_reg=True)`.
+  # NOTE: `rigid_only_micro` is REMOVED — register_micro requires bk_dxdy from
+  # an initial non-rigid pass; combining rigid-only init with micro = TypeError.
+  mode: full_with_micro    # rigid_only | rigid_nonrigid | full_with_micro
+  # `use_he_deconvolution` default is `true`. Macenko-style H&E stain
+  # deconvolution before registration; on faint-hematoxylin samples it
+  # can degrade alignment — override with `--use-he-deconvolution false`
+  # in that case.
+  use_he_deconvolution: true
+  check_for_reflections: true    # Catches mirror/flip failures cheaply.
+  create_masks: false            # Auto-mask can over-mask small tissue islands.
+  align_to_reference: true       # H&E is the reference image.
+
+# ----- Numeric algorithm parameters --------------------------------
+parameters:
+  max_processed_image_dim_px: 1500
+  max_non_rigid_registration_dim_px: 10000
+  micro_rigid_registrar_cls: null
+  micro_rigid_registrar_params: {}
+  name: null                     # registrar run name; auto = <sample_id>_<timestamp>
+
+# ----- Warp stage --------------------------------------------------
+warp:
+  # Defaults to cells + nuclei (the fast path most runs use).
+  # To also warp transcripts, either set include_transcripts: true here
+  # or pass --include-transcripts on the CLI; that appends 'transcripts'
+  # to the targets list. You can also override the whole list with
+  # --warp-targets cells nuclei transcripts.
+  targets: [cells, nuclei]
+  include_transcripts: false
+  use_dask: true
+  save_geojson: true
+  dask:
+    n_workers: 1
+    threads_per_worker: 1
+    memory_limit: 32GB
+    jvm_mem_gb: 1
+
+# ----- Cell-type annotation ----------------------------------------
+celltype:
+  # CSV with at least these columns. If null, the celltype stage is
+  # skipped (raw warped boundaries are still written).
+  csv: null                      # e.g. /path/to/celltype_annotation_SAMPLE1.csv
+  csv_id_col: cell_id            # column joining to Xenium cell_id
+  csv_group_col: group           # column holding the cell-type label
+  nuclei_inherit_classification: true   # nuclei without label inherit from sibling cell
+  area_threshold_px: 20          # drop polygons smaller than this
+  # Rounding for the ANALYSIS output files (raw floats by default so
+  # downstream analysis retains full precision). The QuPath output files
+  # (see qupath_*_round_ndigits below) always round.
+  cell_round_ndigits: null
+  nucleus_round_ndigits: null
+  # Rounding for the QuPath / visualisation output files. 2 decimals is
+  # coarse enough for QuPath's polygon renderer to accept + the pipeline
+  # also runs consecutive-duplicate + close-ring + buffer(0) cleanup on
+  # these outputs to avoid "invalid polygon" errors in QuPath.
+  qupath_cell_round_ndigits: 2
+  qupath_nucleus_round_ndigits: 2
+
+# ----- NN celltype mapping (proseg → Xenium) ------------------------
+# Assigns each Xenium cell a celltype label by nearest-neighbour lookup
+# against proseg-side centroids. Opt-in — not in the default --stages
+# list; add `nn_celltype_mapping` to --stages to enable.
+nn_celltype_mapping:
+  input:
+    # Proseg-side source. Accepts either an .h5ad (canonical, from
+    # rctd-split's mtx_to_h5ad stage) or a .csv[.gz] (matches the
+    # notebook's short-circuit via a pre-exported metadata CSV).
+    # Relative path is joined onto <output_root>/<sample_id>/;
+    # {sample_id} substitution supported.
+    proseg_source: h5ad/{sample_id}_purified.h5ad
+    # Column in the source's .obs (or CSV columns) holding the celltype
+    # label to propagate. Notebook default: first_type (RCTD's top call).
+    proseg_celltype_col: first_type
+    # Proseg centroid columns (Xenium µm frame after mtx_to_h5ad).
+    proseg_x_col: x
+    proseg_y_col: y
+    # Column holding the proseg integer cell identifier. null → use the
+    # underlying .obs / CSV index (matches notebook).
+    proseg_id_col: null
+    # Column holding the direct-join Xenium UUID that proseg preserved.
+    # Used only when nn.hybrid_direct_join_first: true; safely ignored
+    # otherwise.
+    proseg_original_id_col: original_cell_id
+    # Xenium-side inputs. cells.csv.gz relative to <xenium_bundle>/;
+    # notebook default is `cells.csv.gz` with index_col=0 (cell_id).
+    xenium_cells_csv: cells.csv.gz
+    xenium_id_col: cell_id
+    xenium_x_col: x_centroid
+    xenium_y_col: y_centroid
+  nn:
+    # Notebook defaults: k=1, algorithm=auto, metric=euclidean, no threshold.
+    k: 1
+    algorithm: auto           # sklearn: auto | ball_tree | kd_tree | brute
+    metric: euclidean
+    # Only relevant when k>1: min_dist (take closest neighbour) or
+    # majority (mode across the k, break ties by distance).
+    tiebreak: min_dist
+    # Distance beyond which no assignment is considered valid (Xenium µm).
+    # null = no threshold (matches notebook). A concrete value like 50
+    # gives a strict guardrail against silent coord-frame mismatches.
+    distance_threshold: null
+    # Ignored when threshold is null. Options:
+    #   drop            — omit the row from the output CSV
+    #   mark_unassigned — emit `unassigned_label` in `group`
+    #   keep            — emit the far assignment anyway
+    unmatched_policy: mark_unassigned
+    unassigned_label: Unassigned
+    # Hybrid direct-join: for Xenium cells that DO have a matching
+    # original_cell_id on the proseg side, use the direct join;
+    # fall back to NN for the rest. Values:
+    #   "auto"  — decide per-sample from the data (see hybrid_auto_detect
+    #             below). Enabling only when direct-join is actually viable
+    #             preserves pure-NN semantics on samples that don't have
+    #             the original_cell_id column populated.
+    #   true    — force enable regardless of data.
+    #   false   — force disable (pure NN, matches the notebook exactly).
+    hybrid_direct_join_first: "auto"
+    # Thresholds consulted only when hybrid_direct_join_first == "auto".
+    # Both must be met for auto-detect to enable the hybrid path.
+    hybrid_auto_detect:
+      # Minimum fraction of proseg rows that must have a non-null
+      # original_cell_id. Guards against samples where the column is
+      # present but almost entirely null.
+      min_original_id_populated: 0.8
+      # Minimum fraction of Xenium cells whose id appears in proseg's
+      # original_cell_id set. Guards against the "column present but the
+      # id spaces don't actually overlap" case (e.g., frame mismatch).
+      min_xenium_overlap: 0.5
+  coords:
+    # Multiplier applied to proseg (x, y) before NN fit. Default 1.0
+    # (both live in Xenium µm). Bump only if we ingest a proseg run
+    # with a rescaled coord system.
+    proseg_scale_factor: 1.0
+    xenium_scale_factor: 1.0
+    # Cheap sanity check: warn when the two point-cloud bounding boxes
+    # disagree by more than frame_check_tolerance on either axis.
+    verify_same_frame: true
+    frame_check_tolerance: 100.0
+  output:
+    dir: celltype_for_hexenium              # relative to <output_root>/<sample_id>/
+    stem: "{sample_id}_celltype"            # `.csv` (or .csv.gz) appended
+    emit_inspection: true                   # write six-column sidecar
+    inspection_suffix: _inspection
+    write_compression: null                 # gzip | null; null for hexenium consumption
+    # Opt-in list of extra columns to include in the PRIMARY CSV beyond
+    # cell_id + group. Allowed: nn_dist, proseg_id, assignment_note.
+    # (These always land in the *_inspection.csv sidecar regardless.)
+    extra_columns: []
+
+# ----- Visualisation -----------------------------------------------
+viz:
+  enabled: true
+  thumbnail_max_dim: 4096        # downsample H&E to this max dimension for plotting
+  dpi: 200
+  cell_alpha: 0.3
+  nucleus_alpha: 0.6
+  # Which boundaries to draw on the overlay. Default is `nucleus` —
+  # nuclei alone give the cleanest read of registration quality against
+  # H&E's hematoxylin-stained nuclei.
+  # `cell`    — only cell polygons (semi-transparent fill).
+  # `nucleus` — only nucleus outlines.
+  # `both`    — nuclei + cell polygons.
+  render_boundaries: nucleus     # cell | nucleus | both
+  # classification_palette: OPTIONAL overrides for specific labels. Any
+  # celltype in the CSV's `group` column that isn't listed here gets a
+  # color auto-assigned from `palette_cmap` (see below) at run time —
+  # so the viz always colors every label distinctly, even for CSVs with
+  # celltypes we've never seen. Keys are case-sensitive and must match
+  # the CSV's `group` value exactly. The block below is an example set
+  # from a solid-tumor / immune cohort — edit freely.
+  classification_palette:
+    Tumor:       [220,  20,  60]
+    "T/NK":      [ 65, 105, 225]
+    Myeloid:     [138,  43, 226]
+    Fibroblast:  [ 34, 139,  34]
+    Endothelial: [255, 165,   0]
+    Mast:        [255, 105, 180]
+    "B/Plasma":  [128,   0, 128]
+    Unclassified: [180, 180, 180]
+  # Matplotlib qualitative colormap used to auto-assign colors to any
+  # celltype label that isn't in classification_palette above. tab20
+  # gives 20 distinct hues; use tab10 for fewer, or 'Set3' / 'Paired'
+  # for pastel palettes. Assignment order = first-appearance in the
+  # data (deterministic across re-runs).
+  palette_cmap: tab20

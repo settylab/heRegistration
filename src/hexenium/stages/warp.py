@@ -1,0 +1,176 @@
+"""Stage 2: warp Xenium objects (transcripts, cell + nucleus boundaries)
+into H&E pixel space using the registrar pickle from stage 1.
+
+Uses HEST's `warp_and_save_xenium_objects`, driven by a Dask
+LocalCluster with a JVMPlugin so each worker initialises the BioFormats
+JVM exactly once (JPype enforces a single JVM lifecycle per process).
+"""
+from __future__ import annotations
+
+import contextlib
+from pathlib import Path
+
+from hexenium._internal.compat import apply_numpy_shims
+from hexenium._internal.logging import log
+
+
+VALID_TARGETS = {"cells", "nuclei", "transcripts"}
+
+
+@contextlib.contextmanager
+def _dask_with_jvm(
+    n_workers: int,
+    threads_per_worker: int,
+    memory_limit: str,
+    jvm_mem_gb: int,
+):
+    """Start a local Dask cluster whose workers each init the VALIS JVM
+    via a WorkerPlugin. Tear everything down on exit."""
+    import dask
+    from dask.distributed import LocalCluster, Client, WorkerPlugin
+
+    class JVMPlugin(WorkerPlugin):
+        def __init__(self, mem_gb: int = 1):
+            self.mem_gb = mem_gb
+
+        def setup(self, worker):
+            import jpype  # noqa: F401
+            from valis_hest.registration import init_jvm  # type: ignore
+            if not jpype.isJVMStarted():
+                init_jvm(mem_gb=self.mem_gb)
+
+    dask.config.set({"distributed.scheduler.worker-ttl": None})
+    cluster = LocalCluster(
+        n_workers=n_workers,
+        threads_per_worker=threads_per_worker,
+        memory_limit=memory_limit,
+        dashboard_address=None,
+        nanny=False,
+    )
+    client = Client(cluster)
+    client.register_worker_plugin(JVMPlugin(mem_gb=jvm_mem_gb), name="jvm")
+    try:
+        log(f"[warp] dask cluster: {client}; dashboard={client.dashboard_link}")
+        yield client
+    finally:
+        try:
+            client.close()
+        finally:
+            cluster.close()
+
+
+def run_warp(
+    sample_id: str,
+    registrar_pickle: Path,
+    xenium_bundle: Path,
+    output_root: Path,
+    *,
+    dapi_path: Path | None = None,
+    targets: list[str] | None = None,
+    use_dask: bool = True,
+    save_geojson: bool = True,
+    dask_n_workers: int = 1,
+    dask_threads_per_worker: int = 1,
+    dask_memory_limit: str = "32GB",
+    dask_jvm_mem_gb: int = 1,
+    force_rerun: bool = False,
+) -> Path:
+    """Run warp. Returns the warp output directory."""
+    apply_numpy_shims()
+    from hest.registration import warp_and_save_xenium_objects  # type: ignore
+
+    if targets is None:
+        targets = ["cells", "nuclei", "transcripts"]
+    bad = sorted(set(targets) - VALID_TARGETS)
+    if bad:
+        raise ValueError(f"unknown warp targets: {bad}; valid: {sorted(VALID_TARGETS)}")
+
+    out_dir = output_root / sample_id / "warped"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Resume guard — skip if every requested target's sentinel exists.
+    target_files = {
+        "cells": out_dir / "he_cell_seg.parquet",
+        "nuclei": out_dir / "he_nucleus_seg.parquet",
+        "transcripts": out_dir / "he_transcripts.parquet",
+    }
+    needed = [target_files[t] for t in targets]
+    if all(p.exists() for p in needed) and not force_rerun:
+        log(f"[warp] skip — all requested target files exist in {out_dir}")
+        return out_dir
+
+    # The "moving image" basename HEST passes through to VALIS's slide_dict
+    # lookup. Must match the actual DAPI filename used in registration.
+    # If dapi_path was explicitly set (e.g. multichannel ch0000_dapi.ome.tif),
+    # use its basename; otherwise fall back to the standard Xenium layout.
+    from hexenium.stages.registration import resolve_dapi_path
+    dapi_resolved = resolve_dapi_path(xenium_bundle, explicit_path=dapi_path)
+    dapi_filename = dapi_resolved.name
+
+    kwargs = dict(
+        path_registrar=str(registrar_pickle),
+        # HEST 1.1.1 names this parameter `dapi_path` in the public signature
+        # but uses it INTERNALLY as `curr_slide_name` — the slide_dict key VALIS
+        # uses to look up the moving image. That key is the basename of the
+        # file passed to Valis() during registration (here = the symlinked or
+        # actual DAPI filename). The pipeline computed exactly that value
+        # above; we just need to pass it under the public name `dapi_path`.
+        dapi_path=dapi_filename,
+        save_dir=str(out_dir),
+        use_dask=use_dask,
+        verbose=True,
+        save_geojson=save_geojson,
+    )
+
+    if "cells" in targets:
+        kwargs["dapi_cells"] = str(xenium_bundle / "cell_boundaries.parquet")
+    if "nuclei" in targets:
+        kwargs["dapi_nuclei"] = str(xenium_bundle / "nucleus_boundaries.parquet")
+    if "transcripts" in targets:
+        kwargs["dapi_transcripts"] = str(xenium_bundle / "transcripts.parquet")
+
+    # Trim kwargs the installed function doesn't accept (defensive — HEST
+    # versions have varied).
+    import inspect
+    sig = inspect.signature(warp_and_save_xenium_objects)
+    if "path_registrar" not in sig.parameters and "registrar_pickle_path" in sig.parameters:
+        kwargs["registrar_pickle_path"] = kwargs.pop("path_registrar")
+    accepted = {k: v for k, v in kwargs.items() if k in sig.parameters}
+    dropped = sorted(set(kwargs) - set(accepted))
+    if dropped:
+        log(f"[warp] WARN: dropped unsupported kwargs (HEST version skew): {dropped}")
+
+    log(f"[warp] targets resolved: {targets}; outputs will land in {out_dir}")
+    if use_dask:
+        log(f"[warp] starting Dask LocalCluster "
+            f"(n_workers={dask_n_workers}, threads={dask_threads_per_worker}, "
+            f"memory_limit={dask_memory_limit}, jvm_mem_gb={dask_jvm_mem_gb})")
+        with _dask_with_jvm(
+            n_workers=dask_n_workers,
+            threads_per_worker=dask_threads_per_worker,
+            memory_limit=dask_memory_limit,
+            jvm_mem_gb=dask_jvm_mem_gb,
+        ):
+            log(f"[warp] calling warp_and_save_xenium_objects() "
+                f"(typically 20-60 min for cells+nuclei; hours if transcripts included)")
+            warp_and_save_xenium_objects(**accepted)
+            log(f"[warp] warp_and_save_xenium_objects() returned")
+    else:
+        # JVM still required even without dask.
+        from valis_hest.registration import init_jvm  # type: ignore
+        import jpype  # noqa: F401
+        log(f"[warp] use_dask=False; initialising JVM directly")
+        if not jpype.isJVMStarted():
+            init_jvm(mem_gb=dask_jvm_mem_gb)
+        log(f"[warp] calling warp_and_save_xenium_objects()")
+        warp_and_save_xenium_objects(**accepted)
+        log(f"[warp] warp_and_save_xenium_objects() returned")
+
+    # Sanity-check outputs landed.
+    missing = [str(p) for p in needed if not p.exists()]
+    if missing:
+        raise RuntimeError(
+            f"warp_and_save_xenium_objects completed but expected outputs are missing: {missing}"
+        )
+    log(f"[warp] done -> {out_dir}")
+    return out_dir
