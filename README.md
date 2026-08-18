@@ -171,26 +171,34 @@ fit its geometries in memory as a single frame.
 
 ## Installation
 
-`hexenium` targets Python 3.10+ (validated on 3.11) and depends on VALIS,
-HEST, and their Java/BioFormats bridge (`jpype1`, `openjdk=11`). The
-`heRegistration` conda env in `environments/heRegistration.yml` is the
-exact env this package was developed and validated against.
+`hexenium` targets Python 3.10+ (validated on 3.11) and depends on
+VALIS, HEST, and their Java/BioFormats bridge (`jpype1`, `openjdk=11`).
+Reproducing the working env requires a **two-step install** — a
+conda-side solve for the system libraries and scientific-Python core,
+then a `--no-deps` pip layer for `hest` / `valis-wsi` / `valis-hest`
+and their transitive stack. Both steps are captured, in the order they
+should be run, in `environments/heRegistration.yml` and
+`environments/heRegistration-requirements.txt`.
 
-### Recommended: env from `environments/heRegistration.yml` + pinned pip layer
+`--no-deps` on the pip step is **load-bearing** and must live on the
+CLI (see the [why](#why---no-deps-is-mandatory) box below).
 
-Tested end-to-end with `micromamba env create -n heRegistration -f
-environments/heRegistration.yml` on Fred Hutch Gizmo (2026-08). The
-same recipe works under `conda` — swap the tool name in step 2.
+### Recommended (validated on Fred Hutch Gizmo, 2026-08)
+
+The steps below are the exact sequence Tracy validated end-to-end on
+`rhino` with `micromamba 2.6.2`. `conda` works too — swap the tool
+name in step 2 (and `micromamba activate` → `conda activate` in step 3).
 
 ```bash
 # 1. Clone the repo
 git clone https://github.com/settylab/heRegistration.git
 cd heRegistration
 
-# 2. Create the env from the pinned conda spec. The yml file does NOT
-#    declare a name, so pass one with -n; `heRegistration` is the name
-#    the sbatch wrapper defaults to, so using it keeps everything
-#    downstream working without further overrides.
+# 2. Create the conda env from the pinned spec. The yml intentionally
+#    does NOT declare a `name:` field, so you pick the env name with
+#    `-n`. `heRegistration` is the name the sbatch wrapper defaults to
+#    (`ENV_NAME`), so using it keeps everything downstream working
+#    without further overrides.
 micromamba env create -n heRegistration -f environments/heRegistration.yml
 # or with conda:
 # conda env create -n heRegistration -f environments/heRegistration.yml
@@ -199,69 +207,145 @@ micromamba env create -n heRegistration -f environments/heRegistration.yml
 micromamba activate heRegistration
 # or: conda activate heRegistration
 
-# 4. Install the pinned pip layer with `--no-deps` (torch / transformers /
-#    ultralytics / hest / valis-wsi / …). `--no-deps` is load-bearing —
-#    valis-wsi 1.1's declared metadata caps `pandas<2`, `pyvips<3` and
-#    `scikit-image<0.20`, but its actual code paths run fine with the
-#    newer versions this env has; without `--no-deps` pip's resolver
-#    refuses. The flag can't be inlined in the yaml pip: block
-#    (micromamba treats it as a package name) or in the requirements.txt
-#    (pip itself refuses), so it lives on the CLI here. `hest @ git+…@v1.2.0`
-#    is already the first entry in this file, so it gets installed here —
-#    no separate `pip install hest` step is needed.
+# 4. Install the pinned pip layer with `--no-deps`.
+#    This installs hest (git, v1.2.0), valis-wsi 1.1.0, valis_hest 0.0.2,
+#    and the ~160 supporting packages (torch, transformers, ultralytics,
+#    spatialdata, opencv, …) at the exact versions Tracy's working env
+#    was validated against. `--no-deps` is required — see the callout
+#    below. `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0`
+#    is already the first entry in the requirements file, so no
+#    separate `pip install hest` step is needed.
 pip install --no-deps -r environments/heRegistration-requirements.txt
 
-# 5. Install the hexenium package itself (non-editable — see note below)
+# 5. Install the hexenium package itself.
+#    Non-editable is recommended for end users (see note below); use
+#    `pip install -e .` if you plan to hack on hexenium's source.
 pip install .
 
-# 6. Verify
-python -c "import hest; import valis_hest.registration; import valis_hest.slide_io; print('ok')"
+# 6. Sanity-check the install.
+python -c "import hest, valis_hest, valis_hest.registration, valis_hest.slide_io, dask, openslide; print('OK')"
 hexenium --version
 hexenium run --help
 ```
 
-Together, `environments/heRegistration.yml` (conda solve: system libs
-+ scientific-Python core) and
-`environments/heRegistration-requirements.txt` (pip layer: pinned
-overrides + `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0`)
-reproduce the exact working env. If either verification command errors,
-check that the active env is the one you created (not `base`) and that
-both `pip install` steps returned successfully. If you chose a name
-other than `heRegistration`, set `ENV_NAME=<your-env-name>` when using
-the sbatch wrapper below.
+If any of the verification lines errors, jump to
+[Troubleshooting](#troubleshooting) below.
 
-**Why `pip install .` (not `-e`).** For end users we recommend a
-non-editable install: an editable install exposes the source tree to
-`sys.path`, so a stray import via a working-directory Python (or a
-sibling `hexenium/` folder in `cwd`) can shadow the installed package
-and silently pull in half-updated modules. If you are actively
-developing hexenium, use the editable install from the "Development
-& testing" section further down.
+#### Why `--no-deps` is mandatory
 
-### Manual install (if you can't use the env file)
+`valis-wsi 1.1`'s declared `Requires-Dist` metadata caps
+`pandas<2.0`, `pyvips<3.0`, and `scikit-image<0.20`. HEST has similar
+declared-vs-actual divergences. Tracy's working env — the one this
+package is validated against — runs the *newer* pandas 2.3.x /
+pyvips 3.1.x / scikit-image 0.19.x branch. VALIS's actual code paths
+never touch the pandas-1 or pyvips-2 API, so the caps are
+over-defensive relative to the code that hexenium actually calls, but
+pip's resolver refuses to install VALIS against pandas 2.x without
+`--no-deps`. Skipping `--no-deps` yields:
 
-The two `pip install --no-deps` calls below mirror what the yaml
-does: `valis-wsi 1.1`'s declared metadata caps `pandas<2` and
-`pyvips<3`, but its actual code runs fine with pandas 2.x / pyvips
-3.x. Without `--no-deps` pip refuses to install it against a
-pandas>=2 env.
+```
+ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0
+```
+
+`--no-deps` cannot be inlined into the yml `pip:` block (micromamba
+treats each entry as a package name → `ERROR: Invalid requirement:
+--no-deps`) or the top of the requirements file (pip refuses →
+`no such option: --no-deps`), so it lives on the CLI in step 4.
+
+#### Why `pip install .` (not `-e`) for end users
+
+An editable install exposes the source tree to `sys.path`, so a stray
+import via a working-directory Python — or a sibling `hexenium/`
+folder in `cwd` — can shadow the installed package and silently pull
+in half-updated modules. Non-editable is safer for end users. If you
+are actively hacking on hexenium, the "Development & testing"
+section further down covers the editable install.
+
+### Manual install (bypass the env file)
+
+If you can't or don't want to use the env yml, this recipe reproduces
+the same working env by hand. The two-step conda solve + `--no-deps`
+pip layer structure is the same.
 
 ```bash
+# Conda side (system libs + scientific-Python core)
 micromamba create -n heRegistration -c conda-forge -c bioconda \
     python=3.11 'numpy<2' 'pandas<3' scipy pyarrow pyyaml \
-    scanpy dask-geopandas shapely proj pyproj ipykernel \
+    'scanpy>=1.10' dask-geopandas shapely proj pyproj ipykernel \
     importlib_metadata 'pycparser>=2.14' \
-    libvips pyvips imagemagick openslide openjdk=11
+    'libvips>=8.15' 'pyvips>=3' imagemagick openslide openjdk=11
 micromamba activate heRegistration
 
+# Pip side (VALIS + HEST + their transitive stack). See
+# environments/heRegistration-requirements.txt for the exact pins
+# every package should be installed at.
 pip install --no-deps valis-wsi==1.1.0 valis_hest==0.0.2
 pip install --no-deps "hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0" hestcore==1.0.4
-# hest + valis pip-only transitive deps (torch / transformers /
-# ultralytics / spatialdata / opencv-*, anndata 0.12 override,
-# etc.) — see the `- pip:` block of environments/heRegistration.yml
-# for the full pinned set. Or just use the yml file, it's shorter.
-pip install -e /path/to/xenium-he-registration
+# HEST + VALIS have ~160 pip-only transitive deps (torch, transformers,
+# ultralytics, spatialdata, opencv-*, anndata 0.12 override, etc.).
+# The full pinned list is `environments/heRegistration-requirements.txt`
+# — the easiest way to install it is just to run step 4 of the
+# recommended flow above from the repo checkout.
+pip install .  # or `pip install -e .` for development
 ```
+
+### Troubleshooting
+
+The env captured in the two files above is versioned deliberately to
+reproduce exactly. If the install fails, the failure mode is almost
+always one of the following.
+
+- **`ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0`**
+  (or similar for `pyvips` / `scikit-image`) during step 4. You forgot
+  `--no-deps` — see [Why `--no-deps` is mandatory](#why---no-deps-is-mandatory)
+  above. Re-run with `pip install --no-deps -r
+  environments/heRegistration-requirements.txt`.
+- **`ModuleNotFoundError: No module named 'valis_hest'`** (or `hest`
+  / `torch` / `transformers` / `ultralytics`) when you run `hexenium`.
+  Step 4 was skipped or silently failed. Re-run it and re-check with
+  `pip list | grep -Ei 'valis|hest|torch|transformers'`. Expected:
+  `valis_hest 0.0.2`, `valis-wsi 1.1.0`, `hest 1.1.1` (installed from
+  the `v1.2.0` git tag; the package's internal version is `1.1.1`),
+  `hestcore 1.0.4`, `torch 2.6.0`, `transformers 5.1.0`,
+  `ultralytics 8.4.14`.
+- **`VIPS-WARNING: unable to load "vips-magick.so" ... libMagickCore-7.Q16HDRI.so.10:
+  cannot open shared object file`** at first `import pyvips` /
+  `libvips_init`. `imagemagick` is present in the yml exactly to
+  silence this — the warning should not fire on a freshly-created
+  env. If it does, your conda solve is stale or pinned to an older
+  yml revision: `micromamba clean -a` then re-create. The warning
+  itself is benign (the pipeline never uses that loader), so
+  `VIPS_WARNING=off` is a safe temporary silencer.
+- **Micromamba dependency cascade** during step 2 (`libvips` /
+  `gdk-pixbuf` / `librsvg` / `scanpy` "no viable options"). Almost
+  always a stale local cache or a stale `~/.condarc`. Fix in order:
+  1. `micromamba clean -a` (nukes cached repodata + packages).
+  2. If `~/.condarc` is a stale NFS handle (`[Errno 116] Stale file
+     handle`), refresh it: `rm ~/.condarc && touch ~/.condarc` (or
+     restore your original file).
+  3. Re-run `micromamba env create -n heRegistration -f
+     environments/heRegistration.yml` on a networked node.
+- **`openslide-bin` sdist build fails** at step 4 with "Install
+  OpenSlide from source". This is what the `@v1.2.0` pin on HEST
+  guards against — HEST HEAD depends on TRIDENT which pulls
+  `openslide-bin`, and its wheels don't cover older glibc. If you're
+  hitting this, verify line 1 of `environments/heRegistration-requirements.txt`
+  is `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0` and
+  not an unpinned `hest @ git+…HEST.git`.
+- **`hexenium` command not found** after step 5 succeeds. The wrong
+  env is active — check `which hexenium` and re-run `micromamba
+  activate heRegistration`.
+- **Sbatch job fails at env activation** with "environment
+  `heRegistration` not found". You created the env under a different
+  name in step 2. Either recreate as `heRegistration`, or pass the
+  name you used to the sbatch wrapper: `./scripts/submit_he_registration.sh
+  --env-name <your-env-name> …` (or export
+  `ENV_NAME=<your-env-name>` in your shell).
+
+If none of these match, `pip install --no-deps -r
+environments/heRegistration-requirements.txt -v` prints per-package
+progress and surfaces which entry pip is choking on — most useful
+when a wheel has been yanked from PyPI or a git ref has moved.
 
 ## Invocation modes
 
