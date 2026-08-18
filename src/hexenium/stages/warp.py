@@ -1,9 +1,20 @@
 """Stage 2: warp Xenium objects (transcripts, cell + nucleus boundaries)
 into H&E pixel space using the registrar pickle from stage 1.
 
-Uses HEST's `warp_and_save_xenium_objects`, driven by a Dask
-LocalCluster with a JVMPlugin so each worker initialises the BioFormats
-JVM exactly once.
+Uses a locally-vendored shim of HEST's `warp_and_save_xenium_objects`
+(see `hexenium._internal.hest_warp_shim`): HEST v1.2.0 — the version
+pinned in `environments/heRegistration-requirements.txt` — does not
+export that function upstream; it was added to HEST main in the
+"hest V2" refactor (commit 1bb61159, Feb 2026). The shim composes
+v1.2.0's `warp_gdf_valis` primitive to cover the cells + nuclei
+targets that the hexenium default (`warp.targets: [cells, nuclei]`)
+uses. The transcripts target raises a clear NotImplementedError from
+the shim; enabling it requires bumping the HEST pin.
+
+The Dask LocalCluster with JVMPlugin remains — it initialises the
+BioFormats JVM on each worker for future dask-aware code paths; on
+v1.2.0's non-dask `warp_gdf_valis`, the shim inits JVM in the main
+process itself.
 """
 from __future__ import annotations
 
@@ -82,7 +93,10 @@ def run_warp(
     (caller resolves this from the RunLayout).
     """
     apply_numpy_shims()
-    from hest.registration import warp_and_save_xenium_objects  # type: ignore
+    # HEST v1.2.0 (installed pin) does NOT export
+    # `warp_and_save_xenium_objects`; use the local shim that composes
+    # v1.2.0's `warp_gdf_valis`. See module docstring above.
+    from hexenium._internal.hest_warp_shim import warp_and_save_xenium_objects
 
     if targets is None:
         targets = ["cells", "nuclei", "transcripts"]
