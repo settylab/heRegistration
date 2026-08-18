@@ -40,7 +40,12 @@ dependencies:
   - scipy
   - pyarrow
   - pyyaml
-  - scanpy
+  # scanpy>=1.10 excludes the ancient 1.4-1.7 branch that requires
+  # umap-learn<0.5, which conda-forge no longer ships — under a
+  # stale mirror snapshot the solver would drift into it and emit
+  # a "umap-learn does not exist" cascade instead of failing on
+  # scanpy itself. See settylab/TracyY123-nexus#15 comment 5332790877.
+  - scanpy>=1.10
   - dask-geopandas
   - shapely
   - proj
@@ -55,8 +60,14 @@ dependencies:
   # pin. valis-wsi's code paths do not touch the removed pyvips 2
   # API, so 3.x works. imagemagick silences the vips-magick.so
   # dlopen warning by providing libMagickCore-7.Q16HDRI.so.10.
-  - libvips
-  - pyvips
+  #
+  # libvips>=8.15 / pyvips>=3 lock the solver OUT of the older
+  # pyvips 2.2 -> libvips 8.13 branch. Without these floors, a
+  # stale-cache or lagged-mirror micromamba run drifts into that
+  # branch and dies on a gdk-pixbuf / librsvg cascade. See
+  # settylab/TracyY123-nexus#15 comment 5332790877.
+  - libvips>=8.15
+  - pyvips>=3
   - imagemagick
   - openslide
 
