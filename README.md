@@ -30,7 +30,7 @@ At a glance:
 
 ## Package name
 
-The Python package + console script is **`hexenium`** (`pip install -e .`
+The Python package + console script is **`hexenium`** (`pip install .`
 under the tested **`heRegistration`** conda env). The env name is the
 default `ENV_NAME` for the sbatch wrapper.
 
@@ -178,33 +178,44 @@ exact env this package was developed and validated against.
 
 ### Recommended: env from `environments/heRegistration.yml` + pinned pip layer
 
+Tested end-to-end with `micromamba env create -n heRegistration -f
+environments/heRegistration.yml` on Fred Hutch Gizmo (2026-08). The
+same recipe works under `conda` — swap the tool name in step 2.
+
 ```bash
-# 1. Install micromamba (skip if you already have it)
-"${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+# 1. Clone the repo
+git clone https://github.com/settylab/heRegistration.git
+cd heRegistration
 
 # 2. Create the env from the pinned conda spec. The yml file does NOT
-#    declare a name, so pass one with -n; pick whatever you like — the
-#    wrapper below defaults to `heRegistration`, so using that keeps the
-#    defaults working without further overrides.
-cd /path/to/xenium-he-registration
-micromamba env create -n <your-env-name> -f environments/heRegistration.yml
-micromamba activate <your-env-name>
+#    declare a name, so pass one with -n; `heRegistration` is the name
+#    the sbatch wrapper defaults to, so using it keeps everything
+#    downstream working without further overrides.
+micromamba env create -n heRegistration -f environments/heRegistration.yml
+# or with conda:
+# conda env create -n heRegistration -f environments/heRegistration.yml
 
-# 3. Install the pinned pip layer with `--no-deps` (torch / transformers /
+# 3. Activate
+micromamba activate heRegistration
+# or: conda activate heRegistration
+
+# 4. Install the pinned pip layer with `--no-deps` (torch / transformers /
 #    ultralytics / hest / valis-wsi / …). `--no-deps` is load-bearing —
 #    valis-wsi 1.1's declared metadata caps `pandas<2`, `pyvips<3` and
 #    `scikit-image<0.20`, but its actual code paths run fine with the
 #    newer versions this env has; without `--no-deps` pip's resolver
 #    refuses. The flag can't be inlined in the yaml pip: block
 #    (micromamba treats it as a package name) or in the requirements.txt
-#    (pip itself refuses), so it lives on the CLI here.
+#    (pip itself refuses), so it lives on the CLI here. `hest @ git+…@v1.2.0`
+#    is already the first entry in this file, so it gets installed here —
+#    no separate `pip install hest` step is needed.
 pip install --no-deps -r environments/heRegistration-requirements.txt
 
-# 4. Editable install of hexenium
-pip install -e .
+# 5. Install the hexenium package itself (non-editable — see note below)
+pip install .
 
-# 5. Verify
-python -c "import hest, valis_hest, dask, openslide; print('OK')"
+# 6. Verify
+python -c "import hest; import valis_hest.registration; import valis_hest.slide_io; print('ok')"
 hexenium --version
 hexenium run --help
 ```
@@ -212,12 +223,20 @@ hexenium run --help
 Together, `environments/heRegistration.yml` (conda solve: system libs
 + scientific-Python core) and
 `environments/heRegistration-requirements.txt` (pip layer: pinned
-overrides + `hest @ git+https://github.com/mahmoodlab/HEST.git`)
+overrides + `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0`)
 reproduce the exact working env. If either verification command errors,
 check that the active env is the one you created (not `base`) and that
 both `pip install` steps returned successfully. If you chose a name
 other than `heRegistration`, set `ENV_NAME=<your-env-name>` when using
 the sbatch wrapper below.
+
+**Why `pip install .` (not `-e`).** For end users we recommend a
+non-editable install: an editable install exposes the source tree to
+`sys.path`, so a stray import via a working-directory Python (or a
+sibling `hexenium/` folder in `cwd`) can shadow the installed package
+and silently pull in half-updated modules. If you are actively
+developing hexenium, use the editable install from the "Development
+& testing" section further down.
 
 ### Manual install (if you can't use the env file)
 
