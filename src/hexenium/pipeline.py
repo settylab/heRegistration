@@ -116,6 +116,59 @@ def _merge_run_dir_config(layout: RunLayout, cfg: dict) -> None:
     log(f"[pipeline] merged he_registration: key into {path}")
 
 
+def _resolve_existing_registrar(
+    *,
+    register_root: Path,
+    explicit_register_run_id: str | None,
+) -> tuple[Path | None, str | None]:
+    """Locate the registrar pickle to feed into warp when register is
+    NOT in this invocation's ``--stages``.
+
+    Precedence:
+
+    1. ``explicit_register_run_id`` (from ``--register-run-id``) —
+       read ``<register_root>/<X>/manifest.yaml`` directly. Fail LOUD
+       if that manifest is missing rather than silently falling back to
+       the default symlink; the operator asked for a specific pick and
+       hiding a typo behind the fallback would poison downstream
+       lineage checks.
+    2. ``<register_root>/manifest.yaml`` — the default-symlink pointer
+       the register stage maintains. Reads through the symlink to the
+       per-run manifest. Returned ``source_register_run_id`` is
+       resolved from the manifest's ``he_job_id`` field (falling back
+       to the symlink target's leading path component for older
+       manifests written before this field existed).
+
+    Returns ``(registrar_pickle, source_register_run_id)``. Both are
+    ``None`` when no register output exists yet — the warp stage's
+    subsequent ``registrar_pickle is None`` guard raises the actionable
+    error message.
+    """
+    from hexenium.manifest import read_manifest, symlink_target_run_id
+
+    if explicit_register_run_id:
+        per_run = register_root / explicit_register_run_id / "manifest.yaml"
+        if not per_run.exists():
+            raise SystemExit(
+                f"--register-run-id {explicit_register_run_id!r}: "
+                f"manifest not found at {per_run}. Either fix the run id "
+                f"or drop the flag to fall back to the default (the last "
+                f"successful register writes {register_root}/manifest.yaml)."
+            )
+        m = read_manifest(per_run)
+        log(f"[pipeline] --register-run-id {explicit_register_run_id!r} -> {per_run}")
+        return Path(m["registrar_pickle"]), explicit_register_run_id
+
+    default_link = register_root / "manifest.yaml"
+    if not default_link.exists():
+        return None, None
+    m = read_manifest(default_link)
+    source_id = m.get("he_job_id") or symlink_target_run_id(default_link)
+    log(f"[pipeline] using default registrar (he_job_id={source_id!r}) "
+        f"from {default_link}")
+    return Path(m["registrar_pickle"]), source_id
+
+
 def _maybe_derive_proseg_purified(stages, cfg: dict, layout: RunLayout) -> None:
     """Auto-derive ``proseg_purified_h5ad`` from the xenium run dir when
     the user didn't set it explicitly.
@@ -197,6 +250,12 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
 
     n_stages = len(stages)
     registrar_pickle = None
+    # Tracks which register/<he_job_id>/ the current invocation is
+    # consuming. Populated by same-invocation register OR by the
+    # manifest-resolution branch below (--register-run-id explicit /
+    # default-symlink implicit). Passed into warp's per-run manifest as
+    # `source_register_run_id` so set-default-run can validate lineage.
+    source_register_run_id: str | None = None
     # Default warp/celltype dirs for the current run — may be overridden
     # by --warp-run-id / --celltype-run-id below to point at prior runs.
     warp_dir = layout.warp_dir(cfg.get("warp_run_id"))
@@ -272,15 +331,16 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             symlink_to_canonical_name=he_cfg["symlink_to_canonical_name"],
             force_rerun=force_rerun,
         )
+        # Same-invocation register+warp: source register IS this run's
+        # <he_job_id>. Recorded in the warp manifest for lineage.
+        source_register_run_id = layout.he_job_id
         banner(f"stage {idx}/{n_stages}: register — complete in {time.time()-t0:.1f}s")
     else:
-        # Try to discover an existing registrar from the manifest.
-        manifest = layout.registration_dir.parent / "manifest.yaml"
-        if manifest.exists():
-            with open(manifest) as f:
-                m = yaml.safe_load(f)
-            registrar_pickle = Path(m["registrar_pickle"])
-            log(f"[pipeline] using existing registrar from manifest: {registrar_pickle}")
+        # Warp-without-register: resolve which register/<X>/ to consume.
+        registrar_pickle, source_register_run_id = _resolve_existing_registrar(
+            register_root=layout.registration_dir.parent,
+            explicit_register_run_id=cfg.get("register_run_id"),
+        )
 
     if "warp" in stages:
         idx = stages.index("warp") + 1
@@ -310,6 +370,7 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             out_dir=layout.warp_dir(),
             dapi_path=dapi_path,
             targets=targets,
+            source_register_run_id=source_register_run_id,
             use_dask=warp_cfg["use_dask"],
             save_geojson=warp_cfg["save_geojson"],
             dask_n_workers=warp_cfg["dask"]["n_workers"],

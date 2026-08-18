@@ -98,6 +98,12 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                    help="Explicit run label for this invocation (overrides "
                         "$SLURM_JOB_ID). Interactive fallback: YYYYMMDDTHHMMSS "
                         "timestamp.")
+    p.add_argument("--register-run-id", default=None,
+                   help="When running warp against a specific prior registration, "
+                        "point at register/<id>/manifest.yaml directly instead of "
+                        "the register/manifest.yaml default-symlink. Use to compare "
+                        "downstream results across multiple registrations of the "
+                        "same sample.")
     p.add_argument("--warp-run-id", default=None,
                    help="When running celltype/viz without a preceding warp in "
                         "this invocation, point at a prior warp/<id>/ folder.")
@@ -170,6 +176,34 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                    help="Which boundaries to draw on the overlay.")
 
 
+def _add_set_default_run_args(p: argparse.ArgumentParser) -> None:
+    """Argparse wiring for ``hexenium set-default-run``.
+
+    Identity resolution mirrors ``run``: pass ``--sample-id`` +
+    ``--output-root`` (standalone), optionally with ``--run-id`` for
+    integrated-by-run-id mode. Only one ``--*-run-id`` flag is
+    required; the rest keep their current pointer (partial update).
+    """
+    p.add_argument("--sample-id", required=True,
+                   help="Sample identifier — same value used at pipeline run time.")
+    p.add_argument("--run-id", default=None,
+                   help="Upstream xenium-preprocess run id (integrated-by-run-id "
+                        "mode). Omit for standalone-mode layouts.")
+    p.add_argument("--output-root", required=True, type=Path,
+                   help="Root output directory (same value passed at run time).")
+    p.add_argument("--register-run-id", default=None,
+                   help="Retarget output/register to register/<he_job_id>/.")
+    p.add_argument("--warp-run-id", default=None,
+                   help="Retarget output/warp to warp/<he_job_id>/.")
+    p.add_argument("--celltyped-run-id", default=None,
+                   help="Retarget output/celltyped to celltyped/<he_job_id>/.")
+    p.add_argument("--viz-run-id", default=None,
+                   help="Retarget output/viz to viz/<he_job_id>/.")
+    p.add_argument("--force-lineage", action="store_true",
+                   help="Bypass the register↔warp lineage-consistency refusal. "
+                        "Use only when deliberately cross-comparing.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hexenium",
@@ -184,6 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     _add_run_args(run_p)
+
+    sdr_p = sub.add_parser(
+        "set-default-run",
+        help="Re-point output/<stage> symlinks after visual QA.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_set_default_run_args(sdr_p)
     return parser
 
 
@@ -215,6 +256,8 @@ def _resolve_config(args: argparse.Namespace) -> dict:
         overrides["output_root"] = str(args.output_root)
     if args.he_job_id is not None:
         overrides["he_job_id"] = args.he_job_id
+    if args.register_run_id is not None:
+        overrides["register_run_id"] = args.register_run_id
     if args.warp_run_id is not None:
         overrides["warp_run_id"] = args.warp_run_id
     if args.celltype_run_id is not None:
@@ -325,6 +368,20 @@ def _resolve_config(args: argparse.Namespace) -> dict:
     return cfg
 
 
+def _resolve_set_default_run_output_root_he(args: argparse.Namespace) -> Path:
+    """Compute the ``he_registration/`` root from the identity flags.
+
+    Mirrors the layout module's two integrated/standalone shapes
+    (skipping the h5ad-driven mode — ``set-default-run`` is a
+    lightweight symlink-toggle command, not worth another loader).
+    """
+    output_root = Path(args.output_root).resolve()
+    sample_id = args.sample_id
+    if args.run_id:
+        return output_root / sample_id / f"{sample_id}_{args.run_id}" / "he_registration"
+    return output_root / sample_id
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -333,6 +390,24 @@ def main(argv: list[str] | None = None) -> int:
         from hexenium.pipeline import run
         cfg = _resolve_config(args)
         return run(cfg, stages=list(args.stages), argv=sys.argv)
+    if args.cmd == "set-default-run":
+        from hexenium.set_default_run import format_changes, set_default_run
+        output_root_he = _resolve_set_default_run_output_root_he(args)
+        if not output_root_he.exists():
+            raise SystemExit(
+                f"set-default-run: he_registration/ tree not found at "
+                f"{output_root_he}. Check --sample-id/--run-id/--output-root."
+            )
+        result = set_default_run(
+            output_root_he=output_root_he,
+            register_run_id=args.register_run_id,
+            warp_run_id=args.warp_run_id,
+            celltyped_run_id=args.celltyped_run_id,
+            viz_run_id=args.viz_run_id,
+            force_lineage=args.force_lineage,
+        )
+        print(format_changes(result))
+        return 0
     raise SystemExit(f"unknown command: {args.cmd}")
 
 

@@ -23,6 +23,13 @@ from pathlib import Path
 
 from hexenium._internal.compat import apply_numpy_shims
 from hexenium._internal.logging import log
+from hexenium.manifest import (
+    compute_params_hash,
+    git_sha,
+    set_default_symlink,
+    utc_timestamp,
+    write_manifest,
+)
 
 
 VALID_TARGETS = {"cells", "nuclei", "transcripts"}
@@ -85,12 +92,20 @@ def run_warp(
     dask_memory_limit: str = "32GB",
     dask_jvm_mem_gb: int = 1,
     force_rerun: bool = False,
+    source_register_run_id: str | None = None,
 ) -> Path:
     """Run warp. Returns the warp output directory.
 
     ``out_dir`` is the layout-computed
     ``<output_root_he>/warp/<he_job_id>/`` folder
     (caller resolves this from the RunLayout).
+
+    ``source_register_run_id`` is the ``<he_job_id>`` of the
+    ``register/<X>/`` directory whose registrar pickle was consumed.
+    Recorded in the per-run warp manifest so downstream
+    ``set-default-run`` can validate register↔warp lineage before
+    re-pointing user-facing symlinks. When ``None`` the manifest omits
+    the lineage field — expected in tests and in older no-flag flows.
     """
     apply_numpy_shims()
     # HEST v1.2.0 (installed pin) does NOT export
@@ -190,5 +205,57 @@ def run_warp(
         raise RuntimeError(
             f"warp_and_save_xenium_objects completed but expected outputs are missing: {missing}"
         )
+
+    _write_run_manifests(
+        out_dir=out_dir,
+        sample_id=sample_id,
+        targets=targets,
+        use_dask=use_dask,
+        save_geojson=save_geojson,
+        source_register_run_id=source_register_run_id,
+        registrar_pickle=registrar_pickle,
+    )
+
     log(f"[warp] done -> {out_dir}")
     return out_dir
+
+
+def _write_run_manifests(
+    *,
+    out_dir: Path,
+    sample_id: str,
+    targets: list[str],
+    use_dask: bool,
+    save_geojson: bool,
+    source_register_run_id: str | None,
+    registrar_pickle: Path,
+) -> None:
+    """Persist warp's per-run manifest + stage-root default symlink.
+
+    Mirror of the register stage's writer: an immutable per-run
+    manifest at ``<out_dir>/manifest.yaml`` plus a relative symlink at
+    ``<container>/manifest.yaml -> <he_job_id>/manifest.yaml``. The
+    lineage field ``source_register_run_id`` is what
+    ``set-default-run`` reads to reject register/warp mismatches.
+    """
+    he_job_id = out_dir.name
+    container = out_dir.parent
+    warp_params = {
+        "targets": sorted(targets),
+        "use_dask": use_dask,
+        "save_geojson": save_geojson,
+    }
+    payload = {
+        "sample_id": sample_id,
+        "he_job_id": he_job_id,
+        "run_dir": str(out_dir),
+        "source_register_run_id": source_register_run_id,
+        "registrar_pickle": str(registrar_pickle),
+        "params": warp_params,
+        "params_hash": compute_params_hash(warp_params),
+        "git_sha": git_sha(),
+        "timestamp_utc": utc_timestamp(),
+    }
+    write_manifest(out_dir / "manifest.yaml", payload)
+    set_default_symlink(container / "manifest.yaml",
+                        f"{he_job_id}/manifest.yaml")
