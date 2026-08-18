@@ -105,7 +105,7 @@ def run_viz(
     he_path: Path,
     warp_dir: Path,
     celltyped_dir: Path,
-    output_root: Path,
+    out_dir: Path,
     *,
     thumbnail_max_dim: int = 4096,
     dpi: int = 200,
@@ -116,6 +116,14 @@ def run_viz(
     render_boundaries: str = "nucleus",
     force_rerun: bool = False,
 ) -> Path:
+    """Draw warped boundaries on the H&E overlay.
+
+    ``out_dir`` is the layout-computed
+    ``<output_root_he>/viz/<he_job_id>/`` folder.
+    ``celltyped_dir`` may point at THIS run's celltype output OR (via
+    ``--celltype-run-id``) at an earlier run's — the caller resolves
+    that choice from the RunLayout before invoking.
+    """
     if render_boundaries not in ("cell", "nucleus", "both"):
         raise ValueError(
             f"render_boundaries must be one of cell|nucleus|both, got {render_boundaries!r}"
@@ -126,7 +134,6 @@ def run_viz(
     from matplotlib.collections import PolyCollection
     import geopandas as gpd
 
-    out_dir = output_root / sample_id / "viz"
     out_dir.mkdir(parents=True, exist_ok=True)
     sentinel = out_dir / f"{sample_id}_overlay.png"
     if sentinel.exists() and not force_rerun:
@@ -143,8 +150,7 @@ def run_viz(
     # Read every actual classification label from the data first (in
     # first-appearance order), then build a palette that covers all of
     # them — using YAML overrides where present, auto-assigning from
-    # `palette_cmap` where not. This replaces the previous behaviour of
-    # dropping unknown labels to the gray Unclassified color.
+    # `palette_cmap` where not.
     labels_in_data = gdf["classification"].dropna().unique().tolist()
     full_palette = _build_full_palette(
         labels_in_data,
@@ -176,8 +182,7 @@ def run_viz(
             return []
 
     # Draw cell polygons first, nucleus outlines on top. `render_boundaries`
-    # gates each branch: `cell` skips nuclei, `nucleus` skips cells, `both`
-    # draws both (the pre-2026-07-09 behaviour).
+    # gates each branch.
     active = {"cell": ("cell", "both"), "nucleus": ("nucleus", "both")}
     seen_labels = set()
     for boundary_type, alpha in [("cell", cell_alpha), ("nucleus", nucleus_alpha)]:
@@ -193,8 +198,6 @@ def run_viz(
         for label, verts in verts_by_class.items():
             # classification_palette is now guaranteed to cover every
             # label present in the data (see _build_full_palette above).
-            # Kept a defensive fallback in case somebody constructs a
-            # partial palette outside of run_viz.
             color = classification_palette.get(label) or classification_palette.get("Unclassified", [180, 180, 180])
             rgb = tuple(c / 255 for c in color)
             pc = PolyCollection(

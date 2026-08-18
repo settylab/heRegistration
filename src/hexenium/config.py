@@ -1,10 +1,20 @@
 """YAML config loading, merging, and validation for hexenium.
 
-The canonical default config lives at `<package>/config/default.yaml`
-(top-level of the source tree). `load_default()` returns it as a dict;
-`load_user(path)` returns a user override YAML; `deep_update(base, override)`
-does a recursive merge. `validate(cfg)` raises with a readable list of
-missing required top-level keys.
+The canonical default config lives at `<repo-root>/config/default.yaml`.
+`load_default()` returns it as a dict; `load_yaml(path)` returns a user
+override YAML; `deep_update(base, override)` does a recursive merge.
+`validate(cfg)` raises with a readable list of missing required top-level
+keys.
+
+Required-key semantics track the three-mode CLI:
+
+* standalone AND integrated-by-run-id — need ``sample_id`` +
+  ``output_root`` (plus ``he_path`` + ``xenium_bundle`` always).
+* integrated-by-h5ad — ``xenium_h5ad`` is present, so ``sample_id`` +
+  ``output_root`` are optional; identity comes from ``.uns``.
+
+``validate()`` inspects the config to decide which mode's required-set
+applies.
 """
 from __future__ import annotations
 
@@ -21,16 +31,21 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = _REPO_ROOT / "config" / "default.yaml"
 
-REQUIRED_KEYS = ("sample_id", "he_path", "xenium_bundle", "output_root")
+#: Config keys required at ALL invocation modes.
+CORE_REQUIRED_KEYS = ("he_path", "xenium_bundle")
+#: Additional keys required in standalone / integrated-by-run-id modes
+#: (integrated-by-h5ad derives them from .uns).
+STANDALONE_REQUIRED_KEYS = ("sample_id", "output_root")
+#: Retained for tests / external callers that want the pre-refactor
+#: "everything required" set (standalone view).
+REQUIRED_KEYS = CORE_REQUIRED_KEYS + STANDALONE_REQUIRED_KEYS
 
+#: Canonical stage names, in execution order. Kept aligned with
+#: :data:`hexenium.layout.STAGE_NAMES`.
 VALID_STAGES = (
     "he_preprocess", "register", "warp", "celltype", "viz",
-    "nn_celltype_mapping",
 )
-# `nn_celltype_mapping` is opt-in: it needs a proseg-side purified.h5ad
-# and produces the hexenium-input CSV — not every run has that upstream
-# artifact yet. Pass it explicitly via --stages when needed.
-DEFAULT_STAGES = ("he_preprocess", "register", "warp", "celltype", "viz")
+DEFAULT_STAGES = VALID_STAGES
 
 
 def deep_update(base: dict, override: dict) -> dict:
@@ -56,7 +71,14 @@ def load_default() -> dict:
 
 
 def validate(cfg: dict) -> None:
-    """Raise SystemExit if any required top-level key is missing/null."""
-    missing = [k for k in REQUIRED_KEYS if not cfg.get(k)]
+    """Raise SystemExit if a required key is missing/null.
+
+    Mode-aware: when ``xenium_h5ad`` is set (integrated-by-h5ad),
+    ``sample_id`` + ``output_root`` are optional (identity comes from
+    the h5ad's ``.uns``). Otherwise they're required.
+    """
+    missing = [k for k in CORE_REQUIRED_KEYS if not cfg.get(k)]
+    if not cfg.get("xenium_h5ad"):
+        missing += [k for k in STANDALONE_REQUIRED_KEYS if not cfg.get(k)]
     if missing:
         raise SystemExit(f"missing required config keys: {missing}")

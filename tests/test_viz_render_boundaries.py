@@ -29,8 +29,10 @@ def _kinds_drawn(render_boundaries, tmp_path):
         seen.append("nucleus" if kw.get("facecolors") == "none" else "cell")
         return SimpleNamespace()
 
-    (tmp_path / "celltyped").mkdir()
-    (tmp_path / "celltyped" / "S_celltyped_wholeslide.parquet").touch()
+    celltyped_dir = tmp_path / "celltyped"
+    celltyped_dir.mkdir()
+    (celltyped_dir / "S_celltyped_wholeslide.parquet").touch()
+    out_dir = tmp_path / "viz_out"
     with (
         patch.object(viz_mod, "_load_he_thumbnail",
                      return_value=(np.zeros((4, 4, 3), np.uint8), 1.0)),
@@ -42,8 +44,8 @@ def _kinds_drawn(render_boundaries, tmp_path):
             sample_id="S",
             he_path=tmp_path / "he.tif",
             warp_dir=tmp_path / "warped",
-            celltyped_dir=tmp_path / "celltyped",
-            output_root=tmp_path / "out",
+            celltyped_dir=celltyped_dir,
+            out_dir=out_dir,
             render_boundaries=render_boundaries,
         )
     return set(seen)
@@ -63,5 +65,5 @@ def test_render_boundaries_rejects_invalid(tmp_path):
         viz_mod.run_viz(
             sample_id="S", he_path=tmp_path / "h",
             warp_dir=tmp_path / "w", celltyped_dir=tmp_path / "c",
-            output_root=tmp_path / "o", render_boundaries="everything",
+            out_dir=tmp_path / "o", render_boundaries="everything",
         )

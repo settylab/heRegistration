@@ -3,7 +3,7 @@ into H&E pixel space using the registrar pickle from stage 1.
 
 Uses HEST's `warp_and_save_xenium_objects`, driven by a Dask
 LocalCluster with a JVMPlugin so each worker initialises the BioFormats
-JVM exactly once (JPype enforces a single JVM lifecycle per process).
+JVM exactly once.
 """
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def run_warp(
     sample_id: str,
     registrar_pickle: Path,
     xenium_bundle: Path,
-    output_root: Path,
+    out_dir: Path,
     *,
     dapi_path: Path | None = None,
     targets: list[str] | None = None,
@@ -75,7 +75,12 @@ def run_warp(
     dask_jvm_mem_gb: int = 1,
     force_rerun: bool = False,
 ) -> Path:
-    """Run warp. Returns the warp output directory."""
+    """Run warp. Returns the warp output directory.
+
+    ``out_dir`` is the layout-computed
+    ``<output_root_he>/warp/<he_job_id>/`` folder
+    (caller resolves this from the RunLayout).
+    """
     apply_numpy_shims()
     from hest.registration import warp_and_save_xenium_objects  # type: ignore
 
@@ -85,7 +90,6 @@ def run_warp(
     if bad:
         raise ValueError(f"unknown warp targets: {bad}; valid: {sorted(VALID_TARGETS)}")
 
-    out_dir = output_root / sample_id / "warped"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Resume guard — skip if every requested target's sentinel exists.

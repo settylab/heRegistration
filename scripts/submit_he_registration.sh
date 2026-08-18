@@ -1,133 +1,133 @@
 #!/bin/bash -l
 # ---------------------------------------------------------------------
 # Slurm submission wrapper for the `hexenium` pipeline.
+#
 # `bash -l` makes this a LOGIN shell so ~/.bash_profile (and indirectly
 # ~/.bashrc on most setups) gets sourced — that's what initialises
 # micromamba in interactive sessions but is otherwise skipped in
 # non-interactive Slurm batch jobs.
 #
-# Usage:
-#   sbatch scripts/submit_he_registration.sh SAMPLE_ID HE_PATH XENIUM_BUNDLE [CELLTYPE_CSV] [--key value ...]
+# Usage — call directly (no `sbatch` prefix); the script self-submits
+# to slurm and routes its own .out/.err under the run folder:
 #
-# Example:
-#   sbatch scripts/submit_he_registration.sh SAMPLE1 \
-#       /path/to/HE.ome.tif \
-#       /path/to/output-XETG... \
-#       /path/to/celltypes.csv
+#   ./scripts/submit_he_registration.sh \
+#       --sample-id     SAMPLE1 \
+#       --run-id        demo_v1 \
+#       --output-root   /path/to/runs \
+#       --he-slide      /path/to/aligned_fullres_HE.ome.tif \
+#       --xenium-bundle /path/to/output-XETG... \
+#       [--stages       register warp celltype viz] \
+#       [--force-rerun]
 #
-# Logs land at: <output_root>/<sample_id>/logs/<job_name>_<jobid>.log
+# Legacy `sbatch scripts/submit_he_registration.sh ...` also works; slurm's
+# .out/.err then land in the submit directory instead of the integrated
+# run folder.
 #
-# No #SBATCH --output / --error directives — Slurm parses those at
-# submit time using your current cwd as the base, and if the cwd isn't
-# writable the log file can't be created and your job fails silently.
-# Instead, we redirect everything to a path under YOUR output root once
-# we know it (which the pipeline owns and `mkdir -p`s on demand).
+# Environment variables:
+#   OUTPUT_ROOT — fallback for --output-root when not passed as a flag.
+#   ENV_NAME    — conda/micromamba env name (default: heRegistration).
 # ---------------------------------------------------------------------
 #SBATCH --job-name=hexenium
 #SBATCH --partition=campus-new
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=10
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=12
+#SBATCH --mem=196G
 #SBATCH --time=2-00:00:00
 
 set -euo pipefail
 
-# ----- Positional args (parsed FIRST so we can route the log) ---------
-SAMPLE_ID="${1:?usage: sbatch scripts/submit_he_registration.sh SAMPLE_ID HE_PATH XENIUM_BUNDLE [CELLTYPE_CSV] [extra --flags]}"
-HE_PATH="${2:?missing HE_PATH}"
-XENIUM_BUNDLE="${3:?missing XENIUM_BUNDLE}"
-CELLTYPE_CSV="${4:-}"
-shift $(( $# < 4 ? $# : 4 ))   # consume up to 4 positional args
-EXTRA_ARGS=("$@")              # anything left = --key value overrides
+# Canonical stage list — MUST stay in sync with hexenium.layout.STAGE_NAMES.
+DEFAULT_STAGES=(he_preprocess register warp celltype viz)
 
-# ----- Resolve OUTPUT_ROOT (mirrors hexenium's precedence) ------------
-# Precedence: --output-root in EXTRA_ARGS > $OUTPUT_ROOT env > (unset -> abort).
-# We intentionally do NOT ship a site-specific default; set OUTPUT_ROOT in
-# your env or pass --output-root on the command line.
-OUTPUT_ROOT="${OUTPUT_ROOT:-}"
-for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
-    if [[ "${EXTRA_ARGS[i]}" == "--output-root" && $((i+1)) -lt ${#EXTRA_ARGS[@]} ]]; then
-        OUTPUT_ROOT="${EXTRA_ARGS[i+1]}"
-        break
+# Compute the stages-suffix from the CLI args. Mirrors
+# hexenium.layout.compute_stages_suffix: empty (argparse default) → "all";
+# full canonical set (any order) → "all"; otherwise underscore-joined.
+_compute_stages_suffix() {
+    local -a stages=("$@")
+    if [[ ${#stages[@]} -eq 0 ]]; then
+        echo "all"
+        return
     fi
-done
-if [[ -z "$OUTPUT_ROOT" ]]; then
-    echo "[submit] ERROR: OUTPUT_ROOT is not set." >&2
-    echo "[submit]   Set OUTPUT_ROOT=/path/to/runs in your env, or pass --output-root /path/to/runs after the positional args." >&2
-    exit 2
-fi
-
-# ----- Create the user-facing log location + REDIRECT (early) --------
-SAMPLE_OUT="$OUTPUT_ROOT/$SAMPLE_ID"
-LOG_DIR="$SAMPLE_OUT/logs"
-mkdir -p "$LOG_DIR"
-
-JOB_TAG="${SLURM_JOB_NAME:-hexenium}_${SLURM_JOB_ID:-local-$(date +%Y%m%d-%H%M%S)}"
-LOG_FILE="$LOG_DIR/${JOB_TAG}.log"
-
-# ----- Validate paths BEFORE the tee redirect ------------------------
-# Fail loud here on missing inputs so the operator sees the problem
-# in stderr immediately and the Slurm job doesn't waste a time slot.
-fail=0
-for arg_name in HE_PATH XENIUM_BUNDLE; do
-    arg_val="${!arg_name}"
-    if [[ ! -e "$arg_val" ]]; then
-        echo "[submit] ERROR: $arg_name does not exist: $arg_val" >&2
-        fail=1
+    local sorted_actual
+    sorted_actual=$(printf '%s\n' "${stages[@]}" | sort | tr '\n' ' ')
+    local sorted_default
+    sorted_default=$(printf '%s\n' "${DEFAULT_STAGES[@]}" | sort | tr '\n' ' ')
+    if [[ "$sorted_actual" == "$sorted_default" ]]; then
+        echo "all"
+    else
+        (IFS=_; echo "${stages[*]}")
     fi
-done
-if [[ -n "$CELLTYPE_CSV" && ! -e "$CELLTYPE_CSV" ]]; then
-    echo "[submit] ERROR: CELLTYPE_CSV does not exist: $CELLTYPE_CSV" >&2
-    fail=1
-fi
-# --dapi-path override (if present in EXTRA_ARGS) also gets checked.
-for ((i=0; i<${#EXTRA_ARGS[@]}; i++)); do
-    if [[ "${EXTRA_ARGS[i]}" == "--dapi-path" && $((i+1)) -lt ${#EXTRA_ARGS[@]} ]]; then
-        dp="${EXTRA_ARGS[i+1]}"
-        if [[ ! -e "$dp" ]]; then
-            echo "[submit] ERROR: --dapi-path does not exist: $dp" >&2
-            fail=1
-        fi
-        break
+}
+
+# ---------------------------------------------------------------------
+# Launcher branch: when called directly (SLURM_JOB_ID unset), parse the
+# routing-relevant flags, self-submit under sbatch with --output/--error
+# routed to the integrated run folder, then exit. Under sbatch the
+# script re-enters with SLURM_JOB_ID set and skips this block.
+# ---------------------------------------------------------------------
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+    SAMPLE_ID=""; RUN_ID=""; OUTPUT_ROOT_ARG=""
+    STAGES=()
+    args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+        case "${args[i]}" in
+            --sample-id)   SAMPLE_ID="${args[i+1]:-}" ;;
+            --run-id)      RUN_ID="${args[i+1]:-}" ;;
+            --output-root) OUTPUT_ROOT_ARG="${args[i+1]:-}" ;;
+            --stages)
+                # nargs="+" — consume values until next flag or end.
+                j=$((i+1))
+                while [[ $j -lt ${#args[@]} && "${args[j]}" != --* ]]; do
+                    STAGES+=("${args[j]}")
+                    j=$((j+1))
+                done
+                ;;
+        esac
+    done
+    OUTPUT_ROOT="${OUTPUT_ROOT_ARG:-${OUTPUT_ROOT:-}}"
+    STAGES_SUFFIX=$(_compute_stages_suffix "${STAGES[@]}")
+
+    if [[ -z "$OUTPUT_ROOT" ]]; then
+        echo "[submit] ERROR: OUTPUT_ROOT is not set." >&2
+        echo "[submit]   Set OUTPUT_ROOT=/path/to/runs in your env, or pass" >&2
+        echo "[submit]   --output-root /path/to/runs on the command line." >&2
+        exit 2
     fi
-done
-if [[ $fail -ne 0 ]]; then
-    echo "[submit] aborting before redirect; fix the path(s) above and resubmit." >&2
-    exit 2
+    if [[ -z "$SAMPLE_ID" ]]; then
+        echo "[submit] ERROR: --sample-id is required." >&2
+        exit 2
+    fi
+
+    # Two-phase submission: sbatch will silently drop .out/.err if the
+    # --output parent dir doesn't exist at job start, but the job id is
+    # only known AFTER sbatch. So submit --hold, mkdir the per-job dir,
+    # then release.
+    if [[ -n "$RUN_ID" ]]; then
+        # Integrated: colocate under the run dir with any upstream logs.
+        LOG_DIR_BASE="$OUTPUT_ROOT/$SAMPLE_ID/${SAMPLE_ID}_${RUN_ID}/logs/logs_heRegistration"
+    else
+        # Standalone: no shared run dir.
+        LOG_DIR_BASE="$OUTPUT_ROOT/$SAMPLE_ID/logs"
+    fi
+    LOG_LEAF_TMPL="${SAMPLE_ID}_%j_${STAGES_SUFFIX}"
+    mkdir -p "$LOG_DIR_BASE"
+    JOBID=$(sbatch --parsable --hold \
+        --output="$LOG_DIR_BASE/${LOG_LEAF_TMPL}/slurm-%j.out" \
+        --error="$LOG_DIR_BASE/${LOG_LEAF_TMPL}/slurm-%j.err" \
+        "$0" "$@")
+    if [[ -z "$JOBID" ]]; then
+        echo "[submit] sbatch failed to return a job id" >&2
+        exit 1
+    fi
+    mkdir -p "$LOG_DIR_BASE/${SAMPLE_ID}_${JOBID}_${STAGES_SUFFIX}"
+    scontrol release "$JOBID"
+    echo "Submitted batch job $JOBID (logs: ${SAMPLE_ID}_${JOBID}_${STAGES_SUFFIX})"
+    exit 0
 fi
 
-# Redirect EVERYTHING from this point on to $LOG_FILE.
-#
-# TWO PATHS, chosen by execution context:
-#
-#   sbatch batch script  (SLURM_JOB_ID set AND SLURM_STEP_ID unset)
-#       -> plain file redirect: `exec >> "$LOG_FILE" 2>&1`.
-#       No tee, no process substitution. python -u keeps output
-#       unbuffered, so we don't need tee's line-buffered flush.
-#       Loss: no live console echo -- but sbatch has no controlling
-#       terminal anyway, and slurm-<jobid>.out already captured the
-#       pre-redirect lines.
-#
-#   interactive `bash submit.slurm.sh` or `srun bash submit.slurm.sh`
-#       -> keep the tee-in-process-substitution for live console echo.
-#       stdbuf -oL forces per-line flush (vs. GNU tee's default ~4 KB
-#       block buffer) so tracebacks show up promptly.
-#
-# WHY split? Under sbatch (no controlling terminal + shared-filesystem
-# latency), a chatty subprocess (VALIS/Java) can burst output faster
-# than tee can flush; tee's stdin pipe buffer (64 KB kernel default)
-# fills, tee's write blocks on FS latency, python's next write blocks
-# on the full pipe, and with `set -euo pipefail` there is no SIGPIPE
-# escape hatch -- the whole job deadlocks silently holding its full
-# allocation. An interactive terminal drains fast enough to keep tee
-# flowing, so the tee path is only unsafe under sbatch.
-if [[ -n "${SLURM_JOB_ID:-}" && -z "${SLURM_STEP_ID:-}" ]]; then
-    exec >> "$LOG_FILE" 2>&1
-else
-    exec > >(stdbuf -oL -eL tee -a "$LOG_FILE") 2> >(stdbuf -oL -eL tee -a "$LOG_FILE" >&2)
-fi
-
-echo "[submit] log file: $LOG_FILE"
+# ---------------------------------------------------------------------
+# Under-sbatch branch: activate the env and run hexenium.
+# ---------------------------------------------------------------------
 
 # ----- Conda / micromamba / mamba env activation ---------------------
 # Slurm batch jobs run non-interactive shells. Interactive setups put
@@ -141,7 +141,7 @@ echo "[submit] log file: $LOG_FILE"
 #   3) source the micromamba hook script to (re)define the shell function.
 #
 # ENV_NAME defaults to heRegistration; override via
-# `ENV_NAME=other_env sbatch scripts/submit_he_registration.sh ...`.
+# `ENV_NAME=other_env ./scripts/submit_he_registration.sh ...`.
 ENV_NAME="${ENV_NAME:-heRegistration}"
 activated=0
 
@@ -226,7 +226,7 @@ if [[ $activated -eq 0 ]]; then
     echo "[submit]     MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX" >&2
     echo "[submit]   Available envs (best effort):" >&2
     micromamba env list 2>/dev/null || true
-    echo "[submit]   Override env name: ENV_NAME=your_env sbatch scripts/submit_he_registration.sh ..." >&2
+    echo "[submit]   Override env name: ENV_NAME=your_env ./scripts/submit_he_registration.sh ..." >&2
     exit 1
 fi
 # Verify python is the env's python, not the system one.
@@ -243,31 +243,14 @@ echo "PWD:          $(pwd)"
 echo "SUBMIT_DIR:   ${SLURM_SUBMIT_DIR:-NA}"
 echo "DATE:         $(date)"
 echo "PYTHON:       $(which python)"
-echo "OUTPUT_ROOT:  $OUTPUT_ROOT"
-echo "SAMPLE_OUT:   $SAMPLE_OUT"
-echo "LOG_FILE:     $LOG_FILE"
 python --version || true
 echo "======================"
 
 # ----- Run ------------------------------------------------------------
-ARGS=(
-    run
-    --sample-id "$SAMPLE_ID"
-    --he-path "$HE_PATH"
-    --xenium-bundle "$XENIUM_BUNDLE"
-)
-if [[ -n "$CELLTYPE_CSV" ]]; then
-    ARGS+=( --celltype-csv "$CELLTYPE_CSV" )
-fi
-ARGS+=( "${EXTRA_ARGS[@]}" )
-
-echo "[submit] running:"
-echo "    hexenium ${ARGS[*]}"
-# PYTHONUNBUFFERED=1 + python -u together force unbuffered stdout/stderr.
-# Without this, Python's prints sit in OS pipe buffers and are LOST when
-# Slurm SIGKILLs at time-limit. Belt + braces because some libraries
-# reopen FDs.
+# PYTHONUNBUFFERED=1 keeps stdout/stderr flushed so nothing is lost when
+# Slurm SIGKILLs at time-limit.
 export PYTHONUNBUFFERED=1
-hexenium "${ARGS[@]}"
+echo "[submit] running: hexenium run $*"
+hexenium run "$@"
 
 echo "[submit] DONE at $(date)"

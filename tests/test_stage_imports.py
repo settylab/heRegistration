@@ -22,7 +22,6 @@ STAGES = (
     "hexenium.stages.warp",
     "hexenium.stages.celltyping",
     "hexenium.stages.viz",
-    "hexenium.stages.nn_celltype_mapping",
 )
 
 
@@ -45,7 +44,6 @@ def test_stages_export_run_functions():
         "hexenium.stages.warp": "run_warp",
         "hexenium.stages.celltyping": "run_celltyping",
         "hexenium.stages.viz": "run_viz",
-        "hexenium.stages.nn_celltype_mapping": "run_nn_celltype_mapping",
     }
     for modname, fname in entrypoints.items():
         try:

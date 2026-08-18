@@ -2,6 +2,16 @@
 
 **Single-sample H&E ↔ Xenium DAPI registration, warp, cell-type propagation, and overlay visualisation.**
 
+> **v0.2.0 breaking changes** — celltype now sources labels directly from an
+> upstream proseg-purified h5ad via inlined nearest-neighbour mapping
+> (no more `--celltype-csv`); three invocation modes (standalone /
+> integrated-by-run-id / integrated-by-h5ad); per-stage outputs are
+> sharded under `register/<he_job_id>/`, `warp/<he_job_id>/`,
+> `celltyped/<he_job_id>/`, `viz/<he_job_id>/`. See
+> [CHANGELOG.md](CHANGELOG.md) for the full delta and migration notes.
+> Some examples below still describe the v0.1.x flow; see the
+> `--help` output and the CHANGELOG for the current interface.
+
 At a glance:
 
 - **Register** a hematoxylin and eosin (H&E) whole-slide image against the DAPI morphology channel of a matched Xenium in-situ transcriptomics run (VALIS via `valis_hest`), composing rigid, non-rigid, and micro-registration transforms into a single registrar.

@@ -12,11 +12,31 @@ Writer:  tifffile (matches 10x's tutorial writer path, level=100 for
          lossless JPEG 2000 — Xenium Explorer rejects lossy variants).
 
 Stage 0 gets skipped (no-op) if `--he-path` isn't a `.vsi` file OR
-if the output OME-TIFF already exists. Downstream stages register /
-warp / celltype / viz then run against the converted OME-TIFF.
+if a converted OME-TIFF already exists for the sample. Downstream
+stages register / warp / celltype / viz then run against the
+converted OME-TIFF.
+
+Canonical output location — next to the source VSI, using the VSI's
+stem as the filename:
+
+    <vsi_dir>/<vsi_stem>.ome.tif
+
+Rationale: the conversion is a per-sample artifact, not per-run —
+one converted OME-TIFF serves every pipeline invocation for that
+sample. Placing it next to the source VSI makes it discoverable by
+any run without threading a pipeline-specific output path through,
+and survives changes to --output-root / --run-id / --he-job-id.
+
+Fallback: when ``<vsi_dir>`` isn't writable (e.g. the H&E source
+tree is a read-only share), write to
+``<out_dir>/<sample_id>_he.ome.tif`` under the pipeline's own
+output tree instead. ``discover_existing_ometiff`` also checks
+this fallback path so a run that previously produced the OME-TIFF
+under the pipeline tree is still detected.
 """
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -32,10 +52,52 @@ def is_vsi_input(he_path: Path) -> bool:
     return he_path.suffix.lower() in VSI_EXTENSIONS
 
 
-def _derive_ometiff_out_path(vsi_path: Path, out_root: Path, sample_id: str) -> Path:
-    """Where the converted OME-TIFF lands under the pipeline output tree."""
-    out_dir = out_root / sample_id / "he_preprocessed"
+def _next_to_source_path(vsi_path: Path) -> Path:
+    """Canonical per-sample OME-TIFF location: next to the source VSI."""
+    return vsi_path.parent / f"{vsi_path.stem}.ome.tif"
+
+
+def _fallback_out_path(out_dir: Path, sample_id: str) -> Path:
+    """Pipeline-tree fallback when the source dir isn't writable."""
     return out_dir / f"{sample_id}_he.ome.tif"
+
+
+def _derive_ometiff_out_path(vsi_path: Path, out_dir: Path, sample_id: str) -> Path:
+    """Where the converted OME-TIFF should be written.
+
+    Preferred layout is next to the source VSI (idempotent —
+    discoverable by any run of this sample without pipeline-path
+    threading). Falls back to ``<out_dir>/<sample_id>_he.ome.tif``
+    under the pipeline output tree when the source directory isn't
+    writable.
+    """
+    preferred = _next_to_source_path(vsi_path)
+    if os.access(vsi_path.parent, os.W_OK):
+        return preferred
+    log(f"[he_preprocess] source dir {vsi_path.parent} is not writable; "
+        f"falling back to pipeline output tree for OME-TIFF")
+    return _fallback_out_path(out_dir, sample_id)
+
+
+def discover_existing_ometiff(
+    vsi_path: Path, out_dir: Path, sample_id: str
+) -> Path | None:
+    """Return an existing per-sample OME-TIFF for this VSI, or ``None``.
+
+    Checks the canonical next-to-source location first, then the
+    pipeline-tree fallback used when the source dir was previously
+    read-only. This is the discovery hook the pipeline uses to skip
+    ``he_preprocess`` when a prior run already produced the OME-TIFF
+    — including when the caller left ``he_preprocess`` out of
+    ``--stages`` entirely.
+    """
+    for candidate in (
+        _next_to_source_path(vsi_path),
+        _fallback_out_path(out_dir, sample_id),
+    ):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def convert_vsi_to_ometiff(
@@ -192,7 +254,7 @@ def convert_vsi_to_ometiff(
 def run_he_preprocess(
     sample_id: str,
     he_path: Path,
-    output_root: Path,
+    out_dir: Path,
     *,
     tile_size: int = 1024,
     compression: str = "jpeg2000",
@@ -202,13 +264,30 @@ def run_he_preprocess(
 ) -> Path:
     """Pipeline entrypoint. If he_path is a VSI, convert to OME-TIFF and
     return the converted path. If he_path is already an OME-TIFF, return
-    it unchanged (no-op)."""
+    it unchanged (no-op).
+
+    Discovery: when ``force_rerun=False``, checks the canonical
+    next-to-source location and the pipeline-tree fallback for an
+    existing OME-TIFF; if either is found, logs and returns it without
+    re-converting. This is what makes re-runs across different
+    he_job_id / run_id share a single conversion.
+
+    ``out_dir`` is the layout-computed ``converted/`` folder — the
+    caller (``pipeline.run``) resolves this from the ``RunLayout``.
+    """
     if not is_vsi_input(he_path):
         log(f"[he_preprocess] input is not a VSI ({he_path.suffix}); skipping stage 0 — "
             f"downstream stages will use {he_path} as-is")
         return he_path
 
-    out_path = _derive_ometiff_out_path(he_path, output_root, sample_id)
+    if not force_rerun:
+        existing = discover_existing_ometiff(he_path, out_dir, sample_id)
+        if existing is not None:
+            log(f"[he_preprocess] OME-TIFF found at {existing} — "
+                f"skipping preprocess (pass --force-preprocess to redo the conversion)")
+            return existing
+
+    out_path = _derive_ometiff_out_path(he_path, out_dir, sample_id)
     return convert_vsi_to_ometiff(
         he_path, out_path,
         tile_size=tile_size,

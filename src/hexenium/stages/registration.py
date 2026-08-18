@@ -4,15 +4,14 @@ Wraps VALIS (via valis_hest) directly rather than HEST's
 `register_dapi_he`, because the stock function exposes only a subset of
 VALIS kwargs (missing `max_processed_image_dim_px`,
 `use_he_deconvolution`, `create_masks`, `align_to_reference`,
-`non_rigid_registrar_cls`). This wrapper surfaces the full set as
-config parameters.
+`non_rigid_registrar_cls`).
 
 Filename trap: valis_hest's `_post_register` hardcodes the H&E slide-dict
 key as `'aligned_fullres_HE'`. If the H&E basename is anything else, the
 post-register step KeyErrors AFTER successful registration. This module
 symlinks the input H&E to that canonical name inside the per-sample
-workdir before invoking VALIS, so users never have to rename source
-files.
+workdir before invoking VALIS, so the operator never has to rename
+source files.
 """
 from __future__ import annotations
 
@@ -73,7 +72,7 @@ def run_registration(
     sample_id: str,
     he_path: Path,
     xenium_bundle: Path,
-    output_root: Path,
+    out_dir: Path,
     *,
     dapi_path: Path | None = None,
     mode: str = "rigid_only_micro",
@@ -81,6 +80,7 @@ def run_registration(
     check_for_reflections: bool = True,
     create_masks: bool = False,
     align_to_reference: bool = True,
+    max_image_dim_px: int = 1500,
     max_processed_image_dim_px: int = 1500,
     max_non_rigid_registration_dim_px: int = 10000,
     micro_rigid_registrar_cls=None,
@@ -92,11 +92,11 @@ def run_registration(
     """Run registration. Returns the path to `_registrar.pickle`.
 
     `mode`:
-      - rigid_only        : rigid solve, no nonrigid, no micro
-      - rigid_nonrigid    : rigid + nonrigid
-      - full_with_micro   : rigid + nonrigid + micro (stock HEST behavior; default)
+      - rigid_only        : rigid solve, no nonrigid, no micro (fastest).
+      - rigid_nonrigid    : rigid + nonrigid.
+      - full_with_micro   : rigid + nonrigid + micro (stock HEST behavior).
 
-    NOTE: `rigid_only_micro` was removed. Combining
+    NOTE: `rigid_only_micro` was removed on 2026-06-30. Combining
     `non_rigid_registrar_cls=None` in the Valis() constructor (so the
     initial register() pass skips non-rigid) with a subsequent
     register_micro() call raises
@@ -105,6 +105,10 @@ def run_registration(
     combine `slide_obj.bk_dxdy` (the displacement field from the
     initial pass) with the new micro displacements — and bk_dxdy is
     None when the initial pass was rigid-only.
+
+    ``out_dir`` is the layout-computed per-run register dir
+    (``<output_root_he>/register/<he_job_id>``). Caller (pipeline.run)
+    resolves this from the RunLayout.
     """
     apply_numpy_shims()
     from valis_hest import preprocessing, registration  # type: ignore
@@ -126,8 +130,10 @@ def run_registration(
     do_nonrigid = mode in {"rigid_nonrigid", "full_with_micro"}
     do_micro = mode == "full_with_micro"
 
-    out_dir = output_root / sample_id / "registration"
     workdir = out_dir / "_workdir"
+    # container = the folder that carries the cross-run manifest.yaml.
+    # This is <output_root_he>/register/ (parent of the per-he_job_id dirs).
+    container = out_dir.parent
 
     # H&E filename rewrite — sidesteps valis_hest's "Paul fix" hardcode.
     if symlink_to_canonical_name and he_path.stem != "aligned_fullres_HE":
@@ -139,21 +145,25 @@ def run_registration(
     dapi_path = resolve_dapi_path(xenium_bundle, explicit_path=dapi_path)
 
     # Resume check.
+    # ``run_name`` is retained purely for provenance in the manifest —
+    # the on-disk folder is <he_job_id>, so this label is diagnostic,
+    # not path-carrying.
     run_name = name or f"{sample_id}_{get_name_datetime()}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    registrar_dir = out_dir / run_name
+    registrar_dir = out_dir  # caller pre-encodes <he_job_id>
     sentinel = registrar_dir / "data" / "_registrar.pickle"
     if sentinel.exists() and not force_rerun:
         log(f"[registration] skip — registrar already exists at {sentinel}")
         # Persist a manifest pointer if missing.
-        _write_manifest(out_dir / "manifest.yaml", {
+        _write_manifest(container / "manifest.yaml", {
             "sample_id": sample_id,
             "registrar_pickle": str(sentinel),
+            "run_dir": str(registrar_dir),
             "skipped_resume": True,
         })
         return sentinel
 
     registrar_dir.mkdir(parents=True, exist_ok=True)
+    container.mkdir(parents=True, exist_ok=True)
 
     valis_kwargs = dict(
         src_dir="",
@@ -163,6 +173,7 @@ def run_registration(
         check_for_reflections=check_for_reflections,
         create_masks=create_masks,
         align_to_reference=align_to_reference,
+        max_image_dim_px=max_image_dim_px,
         max_processed_image_dim_px=max_processed_image_dim_px,
         max_non_rigid_registration_dim_px=max_non_rigid_registration_dim_px,
         micro_rigid_registrar_cls=micro_rigid_registrar_cls,
@@ -190,10 +201,8 @@ def run_registration(
     # Python process — once kill_jvm is called, scyjava.start_jvm raises
     # `OSError: JVM cannot be restarted`. Downstream stages (warp) call
     # HEST's warp_gdf_valis which unconditionally re-runs init_jvm; that
-    # OSErrors after registration kills the JVM. The right pattern is:
-    # init the JVM once at the start of stage 1, reuse across stages,
-    # let Python's process-exit teardown shut it down. So no try/finally
-    # for JVM cleanup here; errors still propagate as expected.
+    # OSErrors after registration kills the JVM. So no try/finally for
+    # JVM cleanup here; errors still propagate as expected.
     registrar = registration.Valis(**accepted_init)
     log(f"[registration] Valis() constructed")
 
@@ -237,9 +246,10 @@ def run_registration(
             "Inspect the registrar_dir for partial output."
         )
 
-    _write_manifest(out_dir / "manifest.yaml", {
+    _write_manifest(container / "manifest.yaml", {
         "sample_id": sample_id,
         "run_name": run_name,
+        "run_dir": str(registrar_dir),
         "he_input_real": str(he_path),
         "he_passed_to_valis": str(he_for_valis),
         "dapi_path": str(dapi_path),
@@ -249,6 +259,7 @@ def run_registration(
         "check_for_reflections": check_for_reflections,
         "create_masks": create_masks,
         "align_to_reference": align_to_reference,
+        "max_image_dim_px": max_image_dim_px,
         "max_processed_image_dim_px": max_processed_image_dim_px,
         "max_non_rigid_registration_dim_px": max_non_rigid_registration_dim_px,
         "dropped_valis_kwargs_init": dropped_init,
