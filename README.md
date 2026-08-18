@@ -508,14 +508,28 @@ Call:
     --he-slide      /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
     --xenium-bundle /data/SAMPLE1/xenium/output-XETG.../ \
     [--stages       register warp celltype viz] \
+    [--env-name     my-custom-env] \
     [--force-rerun]
 ```
 
 `OUTPUT_ROOT=/data/xenium_runs` in your env is a fallback for
-`--output-root`. `ENV_NAME` overrides the conda env name (default:
-`heRegistration`). The wrapper sources `~/.bashrc` and has a
-micromamba → mamba → conda activation fallback chain so it works on any
-setup that has one of those tools available.
+`--output-root`. The conda env name defaults to `heRegistration` and can
+be overridden two ways — `--env-name my-custom-env` on the CLI (wins) or
+`ENV_NAME=my-custom-env` in the environment. Example:
+
+```bash
+./scripts/submit_he_registration.sh \
+    --sample-id     SAMPLE1 \
+    --run-id        demo_v1 \
+    --output-root   /data/xenium_runs \
+    --he-slide      /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
+    --xenium-bundle /data/SAMPLE1/xenium/output-XETG.../ \
+    --env-name      my-custom-env
+```
+
+The wrapper sources `~/.bashrc` and has a micromamba → mamba → conda
+activation fallback chain so it works on any setup that has one of those
+tools available.
 
 The wrapper builds the logs dir under either
 `<output_root>/<sample>/<sample>_<run_id>/logs/logs_heRegistration/`

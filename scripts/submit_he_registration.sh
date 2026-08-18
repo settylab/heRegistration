@@ -26,6 +26,7 @@
 # Environment variables:
 #   OUTPUT_ROOT — fallback for --output-root when not passed as a flag.
 #   ENV_NAME    — conda/micromamba env name (default: heRegistration).
+#                 Also settable via the --env-name CLI flag, which wins.
 # ---------------------------------------------------------------------
 #SBATCH --job-name=hexenium
 #SBATCH --partition=campus-new
@@ -140,9 +141,33 @@ fi
 #   2) ensure MAMBA_ROOT_PREFIX is set + the micromamba binary is on PATH.
 #   3) source the micromamba hook script to (re)define the shell function.
 #
-# ENV_NAME defaults to heRegistration; override via
-# `ENV_NAME=other_env ./scripts/submit_he_registration.sh ...`.
-ENV_NAME="${ENV_NAME:-heRegistration}"
+# ENV_NAME defaults to heRegistration. Two ways to override:
+#   CLI flag: ./scripts/submit_he_registration.sh --env-name other_env ...
+#   env var:  ENV_NAME=other_env ./scripts/submit_he_registration.sh ...
+# Precedence: --env-name > $ENV_NAME > heRegistration. The flag is
+# stripped from "$@" here so `hexenium run "$@"` below doesn't see it.
+_env_name_cli=""
+_filtered_args=()
+_args=("$@")
+_i=0
+while [[ $_i -lt ${#_args[@]} ]]; do
+    case "${_args[_i]}" in
+        --env-name)
+            _env_name_cli="${_args[$((_i+1))]:-}"
+            _i=$((_i+2))
+            ;;
+        --env-name=*)
+            _env_name_cli="${_args[_i]#--env-name=}"
+            _i=$((_i+1))
+            ;;
+        *)
+            _filtered_args+=("${_args[_i]}")
+            _i=$((_i+1))
+            ;;
+    esac
+done
+set -- "${_filtered_args[@]+"${_filtered_args[@]}"}"
+ENV_NAME="${_env_name_cli:-${ENV_NAME:-heRegistration}}"
 activated=0
 
 # 1) Replay the interactive shell init. set +e so a noisy .bashrc
@@ -226,7 +251,7 @@ if [[ $activated -eq 0 ]]; then
     echo "[submit]     MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX" >&2
     echo "[submit]   Available envs (best effort):" >&2
     micromamba env list 2>/dev/null || true
-    echo "[submit]   Override env name: ENV_NAME=your_env ./scripts/submit_he_registration.sh ..." >&2
+    echo "[submit]   Override env name: --env-name your_env  OR  ENV_NAME=your_env ./scripts/submit_he_registration.sh ..." >&2
     exit 1
 fi
 # Verify python is the env's python, not the system one.
