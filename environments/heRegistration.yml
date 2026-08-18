@@ -18,17 +18,27 @@ dependencies:
   - dask-geopandas=0.5
   - distributed
   - openslide-python=1.4
-  - tifffile=2026.1
-  - pyvips=2.2
+  # Loose tifffile: pin=2026.1 pulled in imagecodecs>=2025.11.11 which
+  # collides with libdeflate on older solvers. Any recent tifffile is
+  # API-compatible for what we use.
+  - tifffile>=2024.5
+  # Keep libvips available system-side (loose pin); pyvips itself is
+  # installed via pip below to sidestep the pyvips->libvips->gdk-pixbuf
+  # /librsvg cascade that older libmamba builds fail to solve.
+  - libvips>=8.13
   - openjdk=11
   - jpype1=1.6
   - anndata=0.11
-  - scanpy=1.11
+  # Loose scanpy: hard-pin =1.11 was unresolvable on older solvers;
+  # any 1.10-1.12 satisfies the code paths we use.
+  - scanpy>=1.10,<1.13
   - opencv
-  # The three image-registration libraries live on PyPI / GitHub. Install
-  # them AFTER the conda env solves.
+  # The image-registration libraries live on PyPI / GitHub. pyvips is
+  # also pip-installed so the solver isn't forced through the messy
+  # conda pyvips<->libvips constraint chain.
   - pip
   - pip:
+      - "pyvips>=2.2,<3"
       - valis-wsi==1.1
       - valis-hest==0.0.2
       # HEST is an editable clone in the reference README (patched
