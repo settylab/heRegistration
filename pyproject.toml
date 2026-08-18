@@ -26,34 +26,33 @@ classifiers = [
 
 # Pins mirror the tested `heRegistration` conda env
 # (environments/heRegistration.yml). The heavy image-registration
-# libraries (valis-wsi, valis-hest, hest) may need to be installed
-# outside a plain `pip install`; the environment.yml carries the
-# full set including the git-installed HEST.
+# libraries (valis-wsi, valis-hest, hest) are pip-only and need
+# `--no-deps` (see the yaml header); a plain `pip install .`
+# outside the conda env will refuse to install valis-wsi against
+# pandas>=2 because valis-wsi 1.1's declared Requires-Dist caps
+# pandas<2. Use the conda env for reproducible installs; keep the
+# pyproject deps loose so `pip install -e .` inside that env does
+# not attempt to downgrade the working-env versions.
 dependencies = [
-    "numpy==1.26.4",
+    "numpy<2",
+    "pandas<3",
     "scipy",
-    "pandas",
-    "pyarrow==23.*",
+    "pyarrow",
     "pyyaml",
-    "matplotlib==3.10.*",
-    "scikit-image==0.19.*",
-    "scikit-learn==1.8.*",
-    "shapely==2.1.*",
-    # geopandas/dask/dask-geopandas capped: valis-wsi 1.1 pins
-    # pandas<2, but geopandas>=1.0 and dask>=2025.1 both require
-    # pandas>=2. Mirror the conda env yaml.
-    "geopandas<1.0",
-    "dask<2025.1",
-    "dask-geopandas<0.5",
+    "matplotlib",
+    "scikit-image",
+    "scikit-learn",
+    "shapely",
+    "geopandas",
+    "dask",
+    "dask-geopandas",
     "distributed",
-    "openslide-python==1.4.*",
-    "tifffile==2026.1.*",
-    "anndata==0.11.*",
-    "scanpy==1.11.*",
+    "openslide-python",
+    "tifffile",
+    "anndata",
+    "scanpy",
     "opencv-python",
-    "jpype1==1.6.*",
-    "valis-wsi==1.1",
-    "valis-hest==0.0.2",
+    "jpype1",
 ]
 
 [project.optional-dependencies]

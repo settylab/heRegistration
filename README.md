@@ -209,17 +209,26 @@ using the sbatch wrapper below.
 
 ### Manual install (if you can't use the env file)
 
+The two `pip install --no-deps` calls below mirror what the yaml
+does: `valis-wsi 1.1`'s declared metadata caps `pandas<2` and
+`pyvips<3`, but its actual code runs fine with pandas 2.x / pyvips
+3.x. Without `--no-deps` pip refuses to install it against a
+pandas>=2 env.
+
 ```bash
 micromamba create -n heRegistration -c conda-forge -c bioconda \
-    python=3.11 numpy=1.26.4 scipy pandas pyarrow=23 pyyaml \
-    matplotlib=3.10 scikit-image=0.19 scikit-learn=1.8 shapely=2.1 \
-    'geopandas<1.0' 'dask<2025.1' 'dask-geopandas<0.5' distributed \
-    openslide-python=1.4 tifffile=2026.1 pyvips=2.2 \
-    openjdk=11 jpype1=1.6 anndata=0.11 scanpy=1.11 opencv
+    python=3.11 'numpy<2' 'pandas<3' scipy pyarrow pyyaml \
+    scanpy dask-geopandas shapely proj pyproj ipykernel \
+    importlib_metadata 'pycparser>=2.14' \
+    libvips pyvips imagemagick openslide openjdk=11
 micromamba activate heRegistration
 
-pip install valis-wsi==1.1 valis-hest==0.0.2
-pip install "hest @ git+https://github.com/mahmoodlab/HEST.git"
+pip install --no-deps valis-wsi==1.1.0 valis_hest==0.0.2
+pip install --no-deps "hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0" hestcore==1.0.4
+# hest + valis pip-only transitive deps (torch / transformers /
+# ultralytics / spatialdata / opencv-*, anndata 0.12 override,
+# etc.) — see the `- pip:` block of environments/heRegistration.yml
+# for the full pinned set. Or just use the yml file, it's shorter.
 pip install -e /path/to/xenium-he-registration
 ```
 
