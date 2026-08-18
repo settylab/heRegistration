@@ -18,6 +18,11 @@ dependencies:
   - dask=2026.1
   - dask-geopandas=0.5
   - distributed
+  # OpenSlide C library + Python binding. Pinning both via conda
+  # avoids the pip `openslide-bin` fallback (no wheels for older
+  # glibc, e.g. rhino02) that HEST HEAD pulls in transitively via
+  # TRIDENT.
+  - openslide
   - openslide-python=1.4
   # Loose tifffile: pin=2026.1 pulled in imagecodecs>=2025.11.11 which
   # collides with libdeflate on older solvers. Any recent tifffile is
@@ -43,5 +48,10 @@ dependencies:
       - valis-wsi==1.1
       - valis-hest==0.0.2
       # HEST is an editable clone in the reference README (patched
-      # locally); install from GitHub for a fresh env.
-      - "hest @ git+https://github.com/mahmoodlab/HEST.git"
+      # locally); install from GitHub for a fresh env. Pinned to
+      # v1.2.0: HEST HEAD requires TRIDENT, which pulls in
+      # `openslide-bin` — a pip-only package whose sdist build fails
+      # on older glibc (rhino02) and whose wheels don't cover this
+      # platform. v1.2.0 (HEST 1.1.1) predates the TRIDENT dep and
+      # matches the currently working env.
+      - "hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0"
