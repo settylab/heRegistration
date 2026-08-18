@@ -182,10 +182,13 @@ exact env this package was developed and validated against.
 # 1. Install micromamba (skip if you already have it)
 "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
 
-# 2. Create the env from the pinned spec
+# 2. Create the env from the pinned spec. The yml file does NOT declare a
+#    name, so pass one with -n; pick whatever you like — the wrapper below
+#    defaults to `heRegistration`, so using that keeps the defaults working
+#    without further overrides.
 cd /path/to/xenium-he-registration
-micromamba env create -f environments/heRegistration.yml
-micromamba activate heRegistration
+micromamba env create -n <your-env-name> -f environments/heRegistration.yml
+micromamba activate <your-env-name>
 
 # 3. Editable install of hexenium
 pip install -e .
@@ -199,8 +202,10 @@ hexenium run --help
 `environments/heRegistration.yml` pulls VALIS + HEST + all the pinned
 scientific-Python deps in one solve (including `hest @
 git+https://github.com/mahmoodlab/HEST.git`). If either verification
-command errors, check that the active env is `heRegistration` (not
-`base`) and that `pip install -e .` returned successfully.
+command errors, check that the active env is the one you created (not
+`base`) and that `pip install -e .` returned successfully. If you chose
+a name other than `heRegistration`, set `ENV_NAME=<your-env-name>` when
+using the sbatch wrapper below.
 
 ### Manual install (if you can't use the env file)
 

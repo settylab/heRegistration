@@ -1,4 +1,5 @@
-name: heRegistration
+# Name intentionally omitted so the caller picks the env name at create time:
+#   conda env create -n <your-env-name> -f environments/heRegistration.yml
 channels:
   - conda-forge
   - bioconda
