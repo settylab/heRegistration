@@ -39,6 +39,17 @@ All notable changes to hexenium will be documented here. Follows
   don't clobber each other's logs.
 
 ### Changed
+- Env install is now a two-step flow: `micromamba env create -f
+  environments/heRegistration.yml` for the conda block, then `pip
+  install --no-deps -r environments/heRegistration-requirements.txt`
+  for the pinned pip layer. The pip: block used to live inline in the
+  yaml with a leading `- --no-deps` sentinel, but micromamba versions
+  that pass each pip: entry through as a requirement string reject it
+  ("ERROR: Invalid requirement: --no-deps"). `--no-deps` is
+  load-bearing (valis-wsi 1.1 declares `pandas<2` / `pyvips<3` while
+  its code paths run fine on the newer versions this env installs) and
+  is not accepted inside a requirements.txt either, so the flag now
+  lives on the CLI in step 2.
 - Stage entrypoints (`run_registration`, `run_warp`, `run_celltyping`,
   `run_viz`, `run_he_preprocess`) now take a pre-computed `out_dir`
   instead of `output_root` + `sample_id`. The pipeline resolves paths

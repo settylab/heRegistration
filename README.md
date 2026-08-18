@@ -176,36 +176,48 @@ HEST, and their Java/BioFormats bridge (`jpype1`, `openjdk=11`). The
 `heRegistration` conda env in `environments/heRegistration.yml` is the
 exact env this package was developed and validated against.
 
-### Recommended: one-step env from `environments/heRegistration.yml`
+### Recommended: env from `environments/heRegistration.yml` + pinned pip layer
 
 ```bash
 # 1. Install micromamba (skip if you already have it)
 "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
 
-# 2. Create the env from the pinned spec. The yml file does NOT declare a
-#    name, so pass one with -n; pick whatever you like — the wrapper below
-#    defaults to `heRegistration`, so using that keeps the defaults working
-#    without further overrides.
+# 2. Create the env from the pinned conda spec. The yml file does NOT
+#    declare a name, so pass one with -n; pick whatever you like — the
+#    wrapper below defaults to `heRegistration`, so using that keeps the
+#    defaults working without further overrides.
 cd /path/to/xenium-he-registration
 micromamba env create -n <your-env-name> -f environments/heRegistration.yml
 micromamba activate <your-env-name>
 
-# 3. Editable install of hexenium
+# 3. Install the pinned pip layer with `--no-deps` (torch / transformers /
+#    ultralytics / hest / valis-wsi / …). `--no-deps` is load-bearing —
+#    valis-wsi 1.1's declared metadata caps `pandas<2`, `pyvips<3` and
+#    `scikit-image<0.20`, but its actual code paths run fine with the
+#    newer versions this env has; without `--no-deps` pip's resolver
+#    refuses. The flag can't be inlined in the yaml pip: block
+#    (micromamba treats it as a package name) or in the requirements.txt
+#    (pip itself refuses), so it lives on the CLI here.
+pip install --no-deps -r environments/heRegistration-requirements.txt
+
+# 4. Editable install of hexenium
 pip install -e .
 
-# 4. Verify
+# 5. Verify
 python -c "import hest, valis_hest, dask, openslide; print('OK')"
 hexenium --version
 hexenium run --help
 ```
 
-`environments/heRegistration.yml` pulls VALIS + HEST + all the pinned
-scientific-Python deps in one solve (including `hest @
-git+https://github.com/mahmoodlab/HEST.git`). If either verification
-command errors, check that the active env is the one you created (not
-`base`) and that `pip install -e .` returned successfully. If you chose
-a name other than `heRegistration`, set `ENV_NAME=<your-env-name>` when
-using the sbatch wrapper below.
+Together, `environments/heRegistration.yml` (conda solve: system libs
++ scientific-Python core) and
+`environments/heRegistration-requirements.txt` (pip layer: pinned
+overrides + `hest @ git+https://github.com/mahmoodlab/HEST.git`)
+reproduce the exact working env. If either verification command errors,
+check that the active env is the one you created (not `base`) and that
+both `pip install` steps returned successfully. If you chose a name
+other than `heRegistration`, set `ENV_NAME=<your-env-name>` when using
+the sbatch wrapper below.
 
 ### Manual install (if you can't use the env file)
 
