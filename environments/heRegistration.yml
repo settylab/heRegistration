@@ -14,9 +14,14 @@ dependencies:
   - scikit-image=0.19
   - scikit-learn=1.8
   - shapely=2.1
-  - geopandas=1.1
-  - dask=2026.1
-  - dask-geopandas=0.5
+  # geopandas 1.1.x pulls pandas>=2.0, but valis-wsi 1.1 hard-pins
+  # pandas<2.0. Cap geopandas at <1.0 (0.14 line) so pandas 1.x is
+  # allowed; dask/dask-geopandas cascade down to versions still on
+  # pandas 1.x (dask 2025.1+ requires pandas>=2, dask-geopandas 0.5
+  # requires dask>=2025.1). See settylab/TracyY123-nexus#15.
+  - geopandas<1.0
+  - dask<2025.1
+  - dask-geopandas<0.5
   - distributed
   # OpenSlide C library + Python binding. Pinning both via conda
   # avoids the pip `openslide-bin` fallback (no wheels for older

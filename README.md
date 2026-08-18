@@ -213,7 +213,7 @@ using the sbatch wrapper below.
 micromamba create -n heRegistration -c conda-forge -c bioconda \
     python=3.11 numpy=1.26.4 scipy pandas pyarrow=23 pyyaml \
     matplotlib=3.10 scikit-image=0.19 scikit-learn=1.8 shapely=2.1 \
-    geopandas=1.1 dask=2026.1 dask-geopandas=0.5 distributed \
+    'geopandas<1.0' 'dask<2025.1' 'dask-geopandas<0.5' distributed \
     openslide-python=1.4 tifffile=2026.1 pyvips=2.2 \
     openjdk=11 jpype1=1.6 anndata=0.11 scanpy=1.11 opencv
 micromamba activate heRegistration

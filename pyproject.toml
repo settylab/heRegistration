@@ -39,9 +39,12 @@ dependencies = [
     "scikit-image==0.19.*",
     "scikit-learn==1.8.*",
     "shapely==2.1.*",
-    "geopandas==1.1.*",
-    "dask==2026.1.*",
-    "dask-geopandas==0.5.*",
+    # geopandas/dask/dask-geopandas capped: valis-wsi 1.1 pins
+    # pandas<2, but geopandas>=1.0 and dask>=2025.1 both require
+    # pandas>=2. Mirror the conda env yaml.
+    "geopandas<1.0",
+    "dask<2025.1",
+    "dask-geopandas<0.5",
     "distributed",
     "openslide-python==1.4.*",
     "tifffile==2026.1.*",
