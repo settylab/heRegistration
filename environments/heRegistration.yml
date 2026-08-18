@@ -37,6 +37,13 @@ dependencies:
   # installed via pip below to sidestep the pyvips->libvips->gdk-pixbuf
   # /librsvg cascade that older libmamba builds fail to solve.
   - libvips>=8.13
+  # libvips loads its magick loader (vips-modules-8.18/vips-magick.so)
+  # at process start via dlopen. Without ImageMagick in the env, it
+  # emits `libMagickCore-7.Q16HDRI.so.10: cannot open shared object
+  # file` on every import — noisy for users even though the code paths
+  # we use don't touch the magick loader. Conda-forge `imagemagick`
+  # 7.1.2 ships that exact SONAME. See settylab/TracyY123-nexus#15.
+  - imagemagick
   - openjdk=11
   - jpype1=1.6
   - anndata=0.11
