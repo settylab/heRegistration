@@ -136,7 +136,10 @@ opencv-python==4.13.0.92
 openslide-python==1.4.3
 param==2.3.2
 pathlib_abc==0.5.2
-Pillow==9.5.0
+Pillow>=9.5.0,<13  # loosened from ==9.5.0 (no cp312 wheels published) so
+                    # hexenium.summary_html's PIL-based figure embed builds
+                    # on Python 3.12+. See settylab/TracyY123-nexus#15
+                    # skeptic finding F3 on the embed-figures commit.
 PIMS==0.7
 pluggy==1.6.0
 polars==1.38.1

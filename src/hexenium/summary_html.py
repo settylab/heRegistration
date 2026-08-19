@@ -5,10 +5,13 @@ successful promotion (both ``hexenium run --set-default-on-success``
 and ``hexenium set-default-run``). Reads what ``output/<stage>``
 currently points at, pulls each stage's per-run ``manifest.yaml``,
 detects two flavors of warning (missing-file, param-drift), and
-emits a single self-contained HTML file. Thumbnails LINK to
-``<stage>/<he_job_id>/`` outputs (relative refs) rather than
-embedding — moving the HTML out of the tree breaks the thumbnails,
-which is the desired signal that the tree owns the artifacts.
+emits a single **self-contained** HTML file — every ``<img>`` on
+the page is an inline ``data:image/png;base64,…`` URI, downscaled
+via :func:`_image_to_data_uri` to keep the whole document under a
+sane size cap. That means the HTML can be moved, emailed, or
+attached to a report without losing the figures, which is the
+promise Tracy asked for on
+``settylab/TracyY123-nexus#15`` comment ``5346844112``.
 
 Design references (all on ``settylab/TracyY123-nexus#15``):
 
@@ -17,8 +20,13 @@ Design references (all on ``settylab/TracyY123-nexus#15``):
 * Comment ``5334874062`` — the interpretation reply with
   clarifying questions.
 * Comment ``5334969034`` — Tracy's answers (both warnings kept
-  with distinct labels; overlap-quality metric deferred; thumbnails).
-* Comment ``5337905668`` — the green-light for this iteration.
+  with distinct labels; overlap-quality metric deferred).
+* Comment ``5337905668`` — green-light for the standard-content
+  renderer.
+* Comment ``5338129631`` — green-light for A3 params sections +
+  C2 dynamic overlap-figure discovery.
+* Comment ``5346844112`` — the reversal of the earlier
+  linked-thumbnails choice; every figure now embeds inline.
 
 **Atomicity**: the renderer writes via ``tmp + os.replace`` so a
 mid-write crash never leaves a half-serialised HTML behind. The

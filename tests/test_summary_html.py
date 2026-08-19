@@ -42,14 +42,34 @@ from hexenium.summary_html import (
 
 def _write_png(
     path: Path, *, size: tuple[int, int] = (64, 64), colour=(200, 50, 50),
+    noise: bool = False,
 ) -> None:
     """Write a real PNG at ``path``. Needed since the renderer now
     embeds via PIL and would fail-and-degrade on a zero-byte touched
     file. Size defaults tiny — tests that need large images pass
-    explicit ``size``."""
+    explicit ``size``.
+
+    ``noise=True`` fills the image with per-pixel uniform noise so
+    the PNG compressor can't collapse it to almost-nothing (a solid
+    colour compresses to <1 KB regardless of dimensions, which
+    makes size-cap tests a paper tiger — skeptic finding F1 on
+    ``settylab/TracyY123-nexus#15``). Use for the tests that
+    verify downscale + total-HTML byte caps.
+    """
     from PIL import Image
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.new("RGB", size, colour).save(path, format="PNG")
+    if noise:
+        # Uniform per-pixel RGB noise. Random has no spatial
+        # correlation so PNG's DEFLATE gets close to the raw byte
+        # count — this is what actually exercises the downscale +
+        # size-cap contracts.
+        import numpy as np
+        arr = np.random.default_rng(seed=0).integers(
+            0, 256, size=(size[1], size[0], 3), dtype=np.uint8,
+        )
+        Image.fromarray(arr, mode="RGB").save(path, format="PNG")
+    else:
+        Image.new("RGB", size, colour).save(path, format="PNG")
 
 
 def _seed_stage(root: Path, stage_dir_name: str, run_id: str, *,
@@ -550,11 +570,20 @@ class TestOverlapFigures:
     def test_large_images_are_downscaled_before_embedding(
         self, he_root: Path,
     ):
-        # Plant a full-VALIS-sized 4000x4000 PNG. After downscale +
-        # PNG re-encode, its embedded payload MUST fit under a sane
-        # per-image cap (500 KiB of base64 = ~375 KiB of PNG bytes).
+        # Plant a full-VALIS-sized 4000x4000 PNG filled with uniform
+        # noise (worst-case compression). After downscale to 800px
+        # + PNG re-encode, its embedded payload must fit under the
+        # per-image cap.
+        #
+        # Noise PNGs at 800x800 empirically encode to ~1.6 MiB of
+        # PNG bytes (base64 -> ~2.1 MiB). Real VALIS overlays are
+        # microscopy composites with spatial correlation and encode
+        # ~10-30x smaller (a few hundred KiB). The cap here bounds
+        # the worst case; regressions in the downscale path would
+        # push far past it.
         overlaps = he_root / "register" / "reg_A" / "overlaps"
-        _write_png(overlaps / "_rigid_overlap.png", size=(4000, 4000))
+        _write_png(overlaps / "_rigid_overlap.png",
+                   size=(4000, 4000), noise=True)
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
@@ -562,8 +591,9 @@ class TestOverlapFigures:
         import re
         srcs = re.findall(r"<img[^>]+src='(data:image/png;base64,[^']+)'", content)
         # Isolate the specific overlap payload (per _EMBED_MAX_DIM_PX
-        # the downscaled size should be well under the cap).
-        cap_kib = 500
+        # the downscaled size should be well under the cap even
+        # under uniform-noise worst case).
+        cap_kib = 3000  # ~3 MiB per embedded image under noise
         for src in srcs:
             payload_len = len(src) - len("data:image/png;base64,")
             assert payload_len < cap_kib * 1024, (
@@ -581,26 +611,38 @@ class TestOverlapFigures:
         content = dest.read_text()
         assert "No overlap diagnostics on disk" in content
 
-    def test_output_html_size_reasonable(self, he_root: Path):
+    def test_output_html_size_reasonable_worst_case(self, he_root: Path):
         # Overall HTML must stay under a sane cap even with all four
-        # embedded overlays + viz overlay. Cap = 5 MiB; downscaled
-        # thumbnails should produce a ~1-2 MiB doc.
+        # overlays + viz overlay ALL as uniform-noise 4000x4000
+        # inputs (worst-case PNG compression).
+        #
+        # Skeptic F1 on the embed-figures commit showed that a
+        # solid-colour test fixture asserted nothing about
+        # compression — a solid PNG collapses to <1 KB regardless
+        # of dimensions. This test uses actual noise so DEFLATE has
+        # nothing to compress, exercising the true worst-case size.
+        #
+        # Empirical measurement at _EMBED_MAX_DIM_PX=800:
+        # ~800x800 noise -> ~1.6 MiB PNG -> ~2.1 MiB base64 per image.
+        # Five embedded images + HTML boilerplate -> ~11 MiB.
+        # Cap = 20 MiB gives comfortable headroom for future style
+        # additions without hiding a real 10x regression.
         overlaps = he_root / "register" / "reg_A" / "overlaps"
         for name in ("_original_overlap.png", "_rigid_overlap.png",
                      "_non_rigid_overlap.png", "_micro_reg.png"):
-            _write_png(overlaps / name, size=(4000, 4000))
-        # Also make the viz overlay large.
+            _write_png(overlaps / name, size=(4000, 4000), noise=True)
         _write_png(he_root / "viz" / "viz_A" / "S1_overlay.png",
-                   size=(4000, 4000))
+                   size=(4000, 4000), noise=True)
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
         size_bytes = dest.stat().st_size
-        cap_mib = 5
+        cap_mib = 20
         assert size_bytes < cap_mib * 1024 * 1024, (
             f"HTML at {size_bytes / (1024 * 1024):.2f} MiB exceeds "
-            f"{cap_mib} MiB cap"
+            f"{cap_mib} MiB cap under uniform-noise worst case"
         )
+
 
     def test_corrupt_png_degrades_gracefully(self, he_root: Path):
         # A zero-byte or non-PNG file at overlaps/*.png must not
