@@ -33,6 +33,7 @@ from hexenium.layout import (
     resolve_he_job_id,
     resolve_layout,
 )
+from hexenium.manifest import output_symlink_run_id
 
 
 def _snapshotable(cfg: dict) -> dict:
@@ -114,6 +115,202 @@ def _merge_run_dir_config(layout: RunLayout, cfg: dict) -> None:
     with open(path, "w") as f:
         yaml.safe_dump(existing, f, sort_keys=False)
     log(f"[pipeline] merged he_registration: key into {path}")
+
+
+#: Stage name (from `--stages`) → dirname under `he_registration/`.
+#: Only the four sharded stages participate in promotion; ``he_preprocess``
+#: writes to the un-sharded ``converted/`` dir and has no ``output/`` link.
+_PROMOTE_STAGE_DIR = {
+    "register": "register",
+    "warp": "warp",
+    "celltype": "celltyped",
+    "viz": "viz",
+}
+
+
+def _promote_completed_run(
+    *,
+    layout: RunLayout,
+    cfg: dict,
+    stages_ran: list[str],
+    source_register_run_id: str | None,
+) -> None:
+    """Post-success promotion hook for ``--set-default-on-success``.
+
+    Fires ONLY after all requested stages complete successfully. Called
+    from the tail of :func:`run` — a stage failure raises before this
+    runs, so any exception in the pipeline body leaves ``output/`` un-
+    touched (the flag is opt-in and the promote is the LAST thing).
+
+    Lineage resolution (per Tracy's ask in
+    ``settylab/TracyY123-nexus#15`` comment ``5336523381``):
+
+    * For each stage that ran this invocation → the fresh
+      ``layout.he_job_id`` (the ``<he_job_id>`` this run's outputs
+      landed under).
+    * Un-run stages are NOT promoted — their ``output/<stage>``
+      symlink keeps whatever it pointed at before, if anything.
+      "Promote the completed run" means what actually completed.
+
+    Lineage validation extension (see
+    :func:`_validate_promotion_lineage`):
+
+    * ``set_default_run`` already enforces the register↔warp check
+      (celltyped/viz not in scope there because celltype/viz stages
+      write no per-run manifest and thus record no ``source_warp_run_id``).
+    * The extension here catches the "``--stages celltype viz`` with
+      ``--warp-run-id X`` while ``output/warp`` points at ``Y != X``"
+      case that the register↔warp check misses — a downstream-only
+      re-promote that would leave ``output/`` inconsistent.
+
+    The whole helper is atomic-by-refusal: it validates everything
+    upfront and calls :func:`set_default_run` (which itself validates
+    ALL targets exist before touching any symlink). If any check fails
+    it raises ``SystemExit``; ``output/`` is unchanged.
+    """
+    from hexenium.set_default_run import format_changes, set_default_run
+
+    promote_ids = _resolve_promotion_ids(
+        layout=layout, stages_ran=stages_ran,
+    )
+    if not promote_ids:
+        log("[promote] --set-default-on-success: no promotable stage in "
+            f"--stages={stages_ran!r} (only he_preprocess ran? skipping).")
+        return
+
+    _validate_promotion_lineage(
+        layout=layout,
+        cfg=cfg,
+        stages_ran=stages_ran,
+        promote_ids=promote_ids,
+        source_register_run_id=source_register_run_id,
+    )
+
+    kwargs = {
+        "register_run_id":  promote_ids.get("register"),
+        "warp_run_id":      promote_ids.get("warp"),
+        "celltyped_run_id": promote_ids.get("celltype"),
+        "viz_run_id":       promote_ids.get("viz"),
+    }
+    log(f"[promote] --set-default-on-success: promoting "
+        f"{ {k: v for k, v in kwargs.items() if v} }")
+    result = set_default_run(output_root_he=layout.output_root_he, **kwargs)
+    log("[promote] output/ updated:\n" + format_changes(result))
+    # TODO: regenerate summary.html here once the renderer lands. The
+    # earlier design proposal in
+    # settylab/TracyY123-nexus#15 issuecomment-5334874062 sketched
+    # `render_summary_html(layout, cfg, metrics)`; not yet
+    # implemented (still on the deferred list from the impl pass).
+
+
+def _resolve_promotion_ids(
+    *, layout: RunLayout, stages_ran: list[str],
+) -> dict[str, str]:
+    """Which promotable stages ran and under which ``<he_job_id>``.
+
+    Every stage in :data:`_PROMOTE_STAGE_DIR` that appears in
+    ``stages_ran`` maps to the current invocation's fresh
+    ``layout.he_job_id`` — that's the ``<he_job_id>`` its outputs just
+    landed under. Un-run stages are omitted from the dict entirely,
+    which is how ``set_default_run`` learns to leave their
+    ``output/<stage>`` symlink alone.
+    """
+    return {
+        stage: layout.he_job_id
+        for stage in stages_ran
+        if stage in _PROMOTE_STAGE_DIR
+    }
+
+
+def _validate_promotion_lineage(
+    *,
+    layout: RunLayout,
+    cfg: dict,
+    stages_ran: list[str],
+    promote_ids: dict[str, str],
+    source_register_run_id: str | None,
+) -> None:
+    """Cross-stage lineage checks that ``set_default_run`` alone can't do.
+
+    ``set_default_run`` reads warp's per-run ``source_register_run_id``
+    to catch register↔warp mismatches, but celltype/viz stages don't
+    write per-run manifests, so a downstream-only promote where the
+    warp INPUT (the stage that celltype/viz consumed) disagrees with
+    ``output/warp`` would slip through. This function reads the
+    pipeline's OWN resolved view (``cfg['warp_run_id']`` /
+    ``layout.he_job_id``) to close that gap.
+
+    Rules enforced:
+
+    1. If ``celltype`` or ``viz`` is being promoted AND ``warp`` is
+       NOT, ``output/warp`` MUST already exist and point at whichever
+       warp celltype/viz just consumed. Otherwise the promoted
+       downstream would be lineage-orphaned.
+    2. If ``register`` is NOT being promoted but ``warp`` IS
+       (rare: ``--stages warp`` alone), ``output/register`` MUST
+       already exist and match the warp's
+       ``source_register_run_id``. ``set_default_run``'s existing
+       register↔warp check catches this too, but we duplicate the
+       preflight here so we fail BEFORE handing off to set-default-run.
+    """
+    output_dir = layout.output_root_he / "output"
+
+    downstream_ran = {"celltype", "viz"} & set(stages_ran)
+    if downstream_ran and "warp" not in promote_ids:
+        warp_consumed = cfg.get("warp_run_id") or layout.he_job_id
+        current_output_warp = output_symlink_run_id(output_dir / "warp")
+        if current_output_warp is None:
+            raise SystemExit(
+                "--set-default-on-success: cannot promote "
+                f"{sorted(downstream_ran)!r} without also promoting warp — "
+                f"output/warp does not exist yet.\n"
+                f"Either include `warp` in --stages, or run "
+                f"`hexenium set-default-run --warp-run-id {warp_consumed}` "
+                f"first (which will also seed output/register)."
+            )
+        if current_output_warp != warp_consumed:
+            raise SystemExit(
+                "--set-default-on-success: lineage mismatch.\n"
+                f"  This run's {sorted(downstream_ran)!r} consumed "
+                f"warp/{warp_consumed}/\n"
+                f"  but output/warp currently points at "
+                f"warp/{current_output_warp}/.\n"
+                f"Promoting would leave output/ inconsistent. Fix:\n"
+                f"  * re-run with `--warp-run-id {current_output_warp}` "
+                f"(match the current default warp), OR\n"
+                f"  * `hexenium set-default-run --warp-run-id {warp_consumed}` "
+                f"before this run (make warp={warp_consumed!r} the default), OR\n"
+                f"  * include `warp` in --stages so a fresh warp is promoted "
+                f"alongside downstream."
+            )
+
+    if "warp" in promote_ids and "register" not in promote_ids:
+        current_output_register = output_symlink_run_id(output_dir / "register")
+        if source_register_run_id is None:
+            # Should be unreachable — warp always resolves a source. Guard
+            # so a future refactor can't silently drop the field.
+            raise SystemExit(
+                "--set-default-on-success: internal error — warp promoted "
+                "but source_register_run_id is unset. Refusing to promote."
+            )
+        if current_output_register is None:
+            raise SystemExit(
+                "--set-default-on-success: cannot promote warp without "
+                "also promoting register — output/register does not exist "
+                "yet.\n"
+                f"Either include `register` in --stages, or run "
+                f"`hexenium set-default-run --register-run-id "
+                f"{source_register_run_id}` first."
+            )
+        if current_output_register != source_register_run_id:
+            raise SystemExit(
+                "--set-default-on-success: lineage mismatch.\n"
+                f"  This run's warp consumed register/{source_register_run_id}/\n"
+                f"  but output/register currently points at "
+                f"register/{current_output_register}/.\n"
+                f"Include `register` in --stages, or set-default-run the "
+                f"correct register first."
+            )
 
 
 def _resolve_existing_registrar(
@@ -438,6 +635,22 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             force_rerun=force_rerun,
         )
         banner(f"stage {idx}/{n_stages}: viz — complete in {time.time()-t0:.1f}s")
+
+    # Post-success promotion (opt-in). Fires ONLY after all stages
+    # above completed without raising — a stage-level SystemExit /
+    # RuntimeError propagates out of this function before this point,
+    # so the promote never sees a partial-success run and `output/`
+    # stays put on failure. Any SystemExit inside the promote itself
+    # (lineage mismatch, missing target) also propagates out unchanged
+    # — set_default_run validates ALL targets up-front so we're
+    # atomic-by-refusal.
+    if cfg.get("set_default_on_success"):
+        _promote_completed_run(
+            layout=layout,
+            cfg=cfg,
+            stages_ran=list(stages),
+            source_register_run_id=source_register_run_id,
+        )
 
     banner(f"hexenium done in {time.time()-pipeline_t0:.1f}s "
            f"-> {layout.output_root_he}/")

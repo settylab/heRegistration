@@ -110,6 +110,17 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--celltype-run-id", default=None,
                    help="When running viz without a preceding celltype in this "
                         "invocation, point viz at a prior celltyped/<id>/ folder.")
+    p.add_argument("--set-default-on-success", action="store_true",
+                   help="After all requested stages complete successfully, "
+                        "atomically promote the run's outputs to "
+                        "<sample>/he_registration/output/ (reusing "
+                        "`hexenium set-default-run`). OFF by default so "
+                        "debug/experiment runs never move `output/`. Only "
+                        "stages that RAN in this invocation are promoted; "
+                        "un-run stages keep their existing pointer. Lineage "
+                        "is validated (register↔warp AND celltype/viz→warp) "
+                        "before any symlink moves — a mismatch aborts the "
+                        "promote with `output/` unchanged.")
     p.add_argument("--force-rerun", action="store_true",
                    help="Re-run all stages even if sentinel outputs exist.")
     p.add_argument("--force-preprocess", action="store_true",
@@ -262,6 +273,8 @@ def _resolve_config(args: argparse.Namespace) -> dict:
         overrides["warp_run_id"] = args.warp_run_id
     if args.celltype_run_id is not None:
         overrides["celltype_run_id"] = args.celltype_run_id
+    if args.set_default_on_success:
+        overrides["set_default_on_success"] = True
     if args.force_rerun:
         overrides["force_rerun"] = True
     if args.force_preprocess:
