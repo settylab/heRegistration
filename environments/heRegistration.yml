@@ -34,8 +34,20 @@ dependencies:
   # Loose caps match Tracy's working env (`env export --from-history`
   # produced `numpy<2` / `pandas<3` — pins that permit numpy 1.26.4
   # and pandas 2.3.x, both of which the working env has).
+  #
+  # numpy is HARD-PINNED to 1.26.4 (not just `<2`) because
+  # `fastcluster` — pulled in by the pip layer — ships a compiled
+  # `.so` linked against numpy 1.x's C API. A drift to numpy 2.x
+  # loads that `.so` and raises `_ARRAY_API not found` /
+  # `numpy.core.multiarray failed to import` at first import (the
+  # classic numpy 1↔2 ABI mismatch). See
+  # settylab/TracyY123-nexus#15 comment 5336001245 for the full
+  # diagnostic trail. The `numpy==1.26.4` pin also appears in
+  # `heRegistration-requirements.txt` as a belt-and-braces guard
+  # against a `pip install --force-reinstall <pkg>` re-resolving
+  # transitive deps and pulling numpy 2.x.
   - python=3.11
-  - numpy<2
+  - numpy=1.26.4
   - pandas<3
   - scipy
   - pyarrow

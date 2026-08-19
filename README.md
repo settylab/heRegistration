@@ -347,6 +347,26 @@ environments/heRegistration-requirements.txt -v` prints per-package
 progress and surfaces which entry pip is choking on — most useful
 when a wheel has been yanked from PyPI or a git ref has moved.
 
+#### Env drift after install (`--force-reinstall` gotchas)
+
+The `numpy==1.26.4` and `xarray==2023.10.1` pins in
+`heRegistration.yml` + `heRegistration-requirements.txt` are
+**load-bearing**. A stray `pip install --force-reinstall <pkg>` (or
+unpinned `pip install --upgrade`) re-resolves transitive
+dependencies and can silently pull `numpy 2.x` — which then blows
+`fastcluster`'s compiled extension with `_ARRAY_API not found` /
+`numpy.core.multiarray failed to import`. A parallel drift for
+`xarray` (to 2026.x, needing pandas 2.1's `NumpyExtensionArray`)
+breaks `import anndata` with `AttributeError: module 'pandas.arrays'
+has no attribute 'NumpyExtensionArray'`.
+
+**Rule of thumb:** any `pip install --force-reinstall <pkg>` must
+be paired with `--no-deps` OR a co-pinned `numpy==1.26.4`.
+`docs/install.md`'s [Env drift & recovery](docs/install.md#env-drift--recovery)
+section carries the full postmortems and per-symptom recovery
+commands (linked back to `settylab/TracyY123-nexus#15` for the
+diagnostic trail).
+
 ## Invocation modes
 
 Three ways to point hexenium at a sample. Pick the one that matches how

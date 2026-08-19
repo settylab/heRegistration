@@ -18,6 +18,30 @@
 # HEST has similar declared-vs-actual divergences.
 #
 # Order-independent (pip installs each independently under --no-deps).
+#
+# numpy is pinned here as a belt-and-braces guard on top of the
+# `numpy=1.26.4` pin in `heRegistration.yml`. Without it, a
+# `pip install --force-reinstall <any-pkg-with-loose-numpy-bound>` — e.g.
+# `pip install --force-reinstall xarray==2023.10.1` (missing --no-deps) —
+# re-resolves transitive deps and pulls numpy 2.x, blowing past what
+# `fastcluster`'s compiled `.so` supports and yielding
+# `_ARRAY_API not found` / `numpy.core.multiarray failed to import`
+# at the next `import fastcluster` (or any downstream chain).
+# See settylab/TracyY123-nexus#15 comments 5336001245 (numpy drift
+# postmortem) and 5334721763 (min-blast-radius env verification).
+numpy==1.26.4
+#
+# xarray pinned to the last release BEFORE the pandas 2.1+
+# `NumpyExtensionArray` rename. xarray 2026.1.0 accesses
+# `pd.arrays.NumpyExtensionArray` at import time — crashing on
+# `pandas 1.5.3` with `AttributeError`. The full diagnostic + why
+# `dask.array`'s `errors="ignore"` on optional xarray does NOT
+# swallow this (AttributeError, not ImportError) is
+# settylab/TracyY123-nexus#15 comment 5335874791.
+# The `xarray-*` companions further down are kept at their current
+# pins; if they choke on the downgraded xarray, uninstall all four
+# (`xarray`, `xarray-dataclass`, `xarray-schema`, `xarray-spatial`)
+# — nothing on the register+warp code path calls xarray directly.
 hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0
 aicspylibczi==3.3.1
 aiobotocore==2.26.0
@@ -172,7 +196,7 @@ urllib3==2.6.3
 valis-wsi==1.1.0
 valis_hest==0.0.2
 weightedstats==0.4.1
-xarray==2026.1.0
+xarray==2023.10.1  # pinned pre-`NumpyExtensionArray` rename; see comment near top of file
 xarray-dataclass==3.0.0
 xarray-schema==0.0.3
 xarray-spatial==0.5.2

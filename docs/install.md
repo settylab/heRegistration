@@ -169,3 +169,134 @@ If none of these match, `pip install --no-deps -r
 environments/heRegistration-requirements.txt -v` prints per-package
 progress and surfaces which entry pip is choking on — most useful
 when a wheel has been yanked from PyPI or a git ref has moved.
+
+## Env drift & recovery
+
+These are bugs that a live env can drift into AFTER a clean install
+succeeds — usually because someone ran `pip install --force-reinstall
+<pkg>` (or an unpinned `pip install --upgrade <pkg>`) which
+re-resolves transitive dependencies and pulls newer versions of
+numpy, xarray, or their kin. The pins in `heRegistration.yml` +
+`heRegistration-requirements.txt` block the initial-install form of
+each drift; the recovery commands below fix an env that has already
+drifted.
+
+Each fix is diagnosed on `settylab/TracyY123-nexus#15`; comment IDs
+are linked so you can retrace the debugging thread.
+
+### The load-bearing rule
+
+**Do NOT run `pip install --force-reinstall <pkg>` without
+`--no-deps` OR a co-pinned `numpy==1.26.4`.** `--force-reinstall`
+re-resolves transitive dependencies, and any package with a loose
+`numpy>=1.22` bound will pull numpy 2.x — silently breaking
+`fastcluster`'s compiled extension (which was built against numpy
+1.x's C API) and any other C-extension package pinned against the
+1.x ABI. If you must force-reinstall a package, add `--no-deps` OR
+pin numpy in the same command:
+
+```bash
+# safe:
+pip install --force-reinstall --no-deps "xarray==2023.10.1"
+pip install --force-reinstall "xarray==2023.10.1" "numpy==1.26.4"
+
+# UNSAFE — silently upgrades numpy to 2.x:
+pip install --force-reinstall "xarray==2023.10.1"
+```
+
+The same rule applies to `pip install --upgrade` without a target
+list — `pip install --upgrade` on an under-pinned env drifts numpy
+just as reliably.
+
+### Bugs & fixes
+
+- **`AttributeError: module 'pandas.arrays' has no attribute
+  'NumpyExtensionArray'`** — first `import anndata` (or any code path
+  that imports `dask.array`, which optionally imports `xarray`).
+  Root cause: your env's `xarray` has drifted to `2026.1.0`, which
+  accesses `pd.arrays.NumpyExtensionArray` at import time — a name
+  that pandas added in 2.1. On `pandas 1.5.3` the attribute is
+  missing and xarray blows up at import. `dask.array` marks xarray
+  as optional (`errors="ignore"`) but that swallow-branch only
+  catches `ImportError`, not `AttributeError`, so a broken xarray
+  crashes the whole chain even though nothing register+warp calls
+  actually needs xarray. Full diagnostic:
+  [comment 5335874791](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5335874791).
+
+  **Fix:**
+  ```bash
+  pip install --force-reinstall --no-deps "xarray==2023.10.1"
+  ```
+
+  If `xarray-dataclass` / `xarray-schema` / `xarray-spatial` complain
+  after the downgrade, uninstall the whole xarray-* family — nothing
+  on the register+warp path calls into xarray directly:
+  ```bash
+  pip uninstall -y xarray xarray-dataclass xarray-schema xarray-spatial
+  ```
+
+- **`_ARRAY_API not found` / `numpy.core.multiarray failed to
+  import`** — first `import fastcluster` or any downstream code path
+  that pulls it (`from valis_hest import registration`,
+  `import scanpy`, …). Root cause: your env's `numpy` has drifted
+  to 2.x while `fastcluster`'s compiled `.so` was built against
+  numpy 1.x — the classic numpy 1↔2 C-API ABI mismatch. The most
+  common way an env drifts into this is a
+  `pip install --force-reinstall <pkg>` where `<pkg>` has a loose
+  `numpy>=1.22` bound and pip re-resolves numpy to the latest.
+  Full diagnostic:
+  [comment 5336001245](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5336001245).
+
+  **Fix:**
+  ```bash
+  pip install --force-reinstall --no-deps "numpy==1.26.4"
+  ```
+
+  Verify the ABI is restored:
+  ```bash
+  python -c "import numpy; print(numpy.__version__)"           # expect 1.26.4
+  python -c "import fastcluster; print(fastcluster.__version__)"  # expect 1.2.6
+  python -c "from valis_hest import registration; print('OK')"    # expect OK
+  ```
+
+### Verified min-blast-radius state
+
+Tracy validated the following pin set end-to-end on Gizmo
+(`heRegistration-test` env, 2026-08-18; see
+[comment 5334721763](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5334721763)):
+
+| Package | Version |
+| --- | --- |
+| `numpy` | `1.26.4` |
+| `pandas` | `1.5.3` |
+| `pyvips` | `2.2.3` |
+| `xarray` | `2023.10.1` |
+| `fastcluster` | `1.2.6` |
+| `hest` | `1.1.1` (installed from the `v1.2.0` git tag) |
+| `valis_hest` | `0.0.2` |
+
+The current `heRegistration.yml` + `heRegistration-requirements.txt`
+resolve to `numpy==1.26.4` + `xarray==2023.10.1` (the load-bearing
+pins) and permit `pandas<3` / `pyvips>=3` / `fastcluster==1.3.0`
+above them — the register+warp code paths run against both the
+pandas-1/pyvips-2 set above and the pandas-2/pyvips-3 set that the
+current pins permit. If you hit a bug we haven't seen and want to
+narrow the surface, `pip install --force-reinstall --no-deps
+"pyvips==2.2.3" "pandas==1.5.3" "fastcluster==1.2.6"` (all with
+`--no-deps`) reproduces Tracy's verified state.
+
+### Shims that are already permanent (nothing to do)
+
+Two HEST v1.2.0 gaps landed as shims in `hexenium/_internal/`:
+
+- `warp_and_save_xenium_objects` — HEST v1.2.0 doesn't export it,
+  so `hexenium._internal.hest_warp_shim` composes v1.2.0's
+  `warp_gdf_valis` primitive. Landed on commit `634158d`.
+- `pixel_size_morph` — HEST's `read_gdf` needed it as a keyword
+  argument; the shim plumbs it through. Landed on commit `60d97ff`.
+
+You do not need to install anything extra for either. If you see
+`ImportError: cannot import name 'warp_and_save_xenium_objects'` or
+`TypeError: unsupported operand type(s) for /: 'float' and
+'NoneType'` from HEST/VALIS, verify your checkout includes both
+commits (`git log --oneline v0.2.0`).
