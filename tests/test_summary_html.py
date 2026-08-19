@@ -256,6 +256,248 @@ class TestParamDriftWarning:
 
 
 # ---------------------------------------------------------------------
+# 7. Registration + warp params sections (Tracy's A3 + B2 on
+# ``settylab/TracyY123-nexus#15`` comment ``5338129631``). Highlights
+# line + collapsible full dump; no schema change.
+# ---------------------------------------------------------------------
+class TestParamsSections:
+    def test_registration_params_section_renders_from_manifest(
+        self, he_root: Path,
+    ):
+        # The fixture's register manifest has ``mode: rigid_only``.
+        # Overwrite it with the load-bearing set so all A3 highlight
+        # keys are exercised.
+        import yaml as _yaml
+        manifest_path = he_root / "register" / "reg_A" / "manifest.yaml"
+        params = {
+            "mode": "full_with_micro",
+            "use_he_deconvolution": True,
+            "check_for_reflections": True,
+            "create_masks": False,
+            "align_to_reference": True,
+            "max_image_dim_px": 1500,
+            "max_processed_image_dim_px": 1500,
+            "max_non_rigid_registration_dim_px": 10000,
+        }
+        m = _yaml.safe_load(manifest_path.read_text())
+        m["params"] = params
+        m["params_hash"] = compute_params_hash(params)
+        manifest_path.write_text(_yaml.safe_dump(m, sort_keys=False))
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+
+        assert "<h2>Registration parameters</h2>" in content
+        # A3 highlights line — the four load-bearing keys.
+        for k in ("mode", "use_he_deconvolution",
+                  "check_for_reflections", "align_to_reference"):
+            assert k in content, f"expected {k} in the register highlights"
+        # Values render — the specific ones on the fixture.
+        assert "full_with_micro" in content
+        # Resolution chip folds the three dim keys into one row.
+        assert "1500/1500/10000" in content
+        # Collapsible <details> block contains the full dump.
+        assert "<details>" in content
+        assert "Full manifest params" in content
+        # `create_masks: false` NOT in highlights but IS in the full
+        # dump. `content.split("<details>")` yields multiple details
+        # blocks (register + warp); locate the register block by
+        # heading position, then slice from there.
+        reg_heading = content.index("<h2>Registration parameters</h2>")
+        reg_details_open = content.index("<details>", reg_heading)
+        reg_details_close = content.index("</details>", reg_details_open)
+        register_details_block = content[reg_details_open:reg_details_close]
+        assert "create_masks" in register_details_block
+        assert ">false<" in register_details_block
+
+    def test_warp_params_section_renders_from_manifest(
+        self, he_root: Path,
+    ):
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "<h2>Warp parameters</h2>" in content
+        # B2 highlights.
+        for k in ("targets", "use_dask", "save_geojson"):
+            assert k in content, f"expected {k} in the warp highlights"
+        # Targets list renders as a compact form.
+        assert "[cells, nuclei]" in content or "['cells', 'nuclei']" in content
+
+    def test_no_params_section_when_manifest_absent(self, tmp_path: Path):
+        # celltype/viz stages don't write per-run manifests today —
+        # B2 defers them. Register-side manifest missing = the section
+        # shows a placeholder instead of a broken layout.
+        root = tmp_path / "he_registration"
+        (root / "output").mkdir(parents=True)
+        # Only celltyped seeded, no register (no manifest).
+        _seed_stage(
+            root, "celltyped", "ct_A",
+            artifact_files=[
+                "S1_cells_analysis.geojson",
+                "S1_cells_qupath.geojson",
+                "S1_nuclei_analysis.geojson",
+                "S1_nuclei_qupath.geojson",
+                "S1_celltyped_wholeslide.parquet",
+            ],
+        )
+        _seed_output_symlink(root / "output", "celltyped", "ct_A")
+        dest = render_summary_html(
+            output_root_he=root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "<h2>Registration parameters</h2>" in content
+        assert "no manifest" in content  # placeholder text
+
+    def test_lists_render_as_compact_form(self, he_root: Path):
+        # Regression guard for the list-value stringifier — a Python
+        # `repr([...])` would render `['cells', 'nuclei']` with quotes.
+        # We want the compact `[cells, nuclei]` form (see
+        # ``_stringify_param_value``).
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        # The compact form is in the highlights chip.
+        assert "[cells, nuclei]" in content
+
+
+# ---------------------------------------------------------------------
+# 8. Dynamic overlap-figure discovery (Tracy's C2 constraint on
+# ``settylab/TracyY123-nexus#15`` comment ``5338129631``). Discover
+# via ``glob`` at render time; never assume a specific set of files.
+# ---------------------------------------------------------------------
+class TestOverlapFigures:
+    def test_overlap_images_render_from_actual_disk_layout(
+        self, he_root: Path,
+    ):
+        # Plant the four canonical VALIS overlap PNGs under the
+        # promoted register run; assert every one gets an <img>.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        overlaps.mkdir(parents=True)
+        for name in ("_original_overlap.png", "_rigid_overlap.png",
+                     "_non_rigid_overlap.png", "_micro_reg.png"):
+            (overlaps / name).touch()
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+
+        assert "<h2>Registration overlap figures</h2>" in content
+        # Each file gets a linked thumbnail via a relative path.
+        for name in ("_original_overlap.png", "_rigid_overlap.png",
+                     "_non_rigid_overlap.png", "_micro_reg.png"):
+            assert f"../register/reg_A/overlaps/{name}" in content
+        # Labels come from _OVERLAP_LABELS.
+        assert "Original (before registration)" in content
+        assert "After rigid solve" in content
+        assert "After non-rigid solve" in content
+        assert "After micro solve" in content
+
+    def test_only_available_images_shown(self, he_root: Path):
+        # rigid_only mode produces only two overlays; C2 says the
+        # HTML must show ONLY those two, not fabricate the missing pair.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        overlaps.mkdir(parents=True)
+        (overlaps / "_original_overlap.png").touch()
+        (overlaps / "_rigid_overlap.png").touch()
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "_original_overlap.png" in content
+        assert "_rigid_overlap.png" in content
+        # These MUST be absent — no fake references.
+        assert "_non_rigid_overlap.png" not in content
+        assert "_micro_reg.png" not in content
+        assert "After non-rigid solve" not in content
+        assert "After micro solve" not in content
+
+    def test_priority_order_stable_across_filesystem_orderings(
+        self, he_root: Path,
+    ):
+        # Filesystem readdir order is unspecified; priority sort must
+        # produce a deterministic display order (rigid before nonrigid,
+        # etc.). Plant in reverse alphabetical to force the point.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        overlaps.mkdir(parents=True)
+        for name in ("_rigid_overlap.png", "_original_overlap.png",
+                     "_non_rigid_overlap.png", "_micro_reg.png"):
+            (overlaps / name).touch()
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        positions = {
+            n: content.index(n)
+            for n in ("_original_overlap.png", "_rigid_overlap.png",
+                      "_non_rigid_overlap.png", "_micro_reg.png")
+        }
+        # Refinement order: original → rigid → non_rigid → micro.
+        assert positions["_original_overlap.png"] < positions["_rigid_overlap.png"]
+        assert positions["_rigid_overlap.png"] < positions["_non_rigid_overlap.png"]
+        assert positions["_non_rigid_overlap.png"] < positions["_micro_reg.png"]
+
+    def test_unknown_filename_falls_to_alphabetical_after_known(
+        self, he_root: Path,
+    ):
+        # A future VALIS release might add a new overlap type; C2
+        # requires we still surface it (dynamic discovery is source
+        # of truth), just after the known ones in alphabetical order.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        overlaps.mkdir(parents=True)
+        (overlaps / "_original_overlap.png").touch()
+        (overlaps / "_rigid_overlap.png").touch()
+        (overlaps / "aaa_unknown_extra.png").touch()  # sorts BEFORE known if pure alpha
+        (overlaps / "zzz_unknown_extra.png").touch()
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        # Known-first: originals + rigid render before the unknowns.
+        p_orig = content.index("_original_overlap.png")
+        p_rigid = content.index("_rigid_overlap.png")
+        p_aaa = content.index("aaa_unknown_extra.png")
+        p_zzz = content.index("zzz_unknown_extra.png")
+        assert p_orig < p_aaa
+        assert p_rigid < p_aaa  # known priority beats alpha ordering
+        assert p_aaa < p_zzz    # alphabetical among unknowns
+        # Unknown filename renders bare (no fake label).
+        assert "aaa_unknown_extra.png" in content
+
+    def test_overlap_section_dynamic_when_no_images(self, he_root: Path):
+        # register promoted, but the overlaps/ dir is empty (or
+        # doesn't exist). Section must render the "no overlap
+        # diagnostics" line rather than an empty/broken block.
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "<h2>Registration overlap figures</h2>" in content
+        assert "No overlap diagnostics on disk" in content
+        # No dangling <img> tag from a phantom overlay.
+        assert "src='../register/reg_A/overlaps/" not in content
+
+    def test_no_promoted_register_shows_placeholder(self, tmp_path: Path):
+        # Fresh he_root with no promoted register at all; the section
+        # must not blow up on the missing symlink.
+        root = tmp_path / "he_registration"
+        (root / "output").mkdir(parents=True)
+        _seed_stage(
+            root, "viz", "viz_A",
+            artifact_files=["S1_overlay.png"],
+        )
+        _seed_output_symlink(root / "output", "viz", "viz_A")
+        dest = render_summary_html(
+            output_root_he=root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "<h2>Registration overlap figures</h2>" in content
+        assert "no promoted register run" in content.lower()
+
+
+# ---------------------------------------------------------------------
 # 4. No overlap-quality section — regression guard for the deferred
 # metric staying entirely absent.
 # ---------------------------------------------------------------------

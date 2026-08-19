@@ -73,6 +73,49 @@ _EXPECTED_ARTIFACTS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Register "highlight" params — the ones a scanner-of-summaries cares
+#: about at a glance. Everything ELSE in ``manifest["params"]`` still
+#: lands in the collapsible full-dump ``<details>`` block. Priority
+#: order = display order.
+_REGISTER_HIGHLIGHT_KEYS: tuple[str, ...] = (
+    "mode",
+    "use_he_deconvolution",
+    "check_for_reflections",
+    "align_to_reference",
+)
+
+#: Warp highlights — the load-bearing ones are the target list + dask
+#: switch. save_geojson toggles a bulky per-target sidecar that some
+#: downstream QuPath workflows depend on, so it earns a highlight slot.
+_WARP_HIGHLIGHT_KEYS: tuple[str, ...] = (
+    "targets",
+    "use_dask",
+    "save_geojson",
+)
+
+#: VALIS overlap-diagnostic filenames in REFINEMENT order — used to
+#: give the discovered overlaps a stable, semantically-meaningful
+#: display order. Filenames NOT in this list fall to alphabetical
+#: order after these (dynamic discovery is the source of truth for
+#: which images render, per Tracy's constraint in
+#: ``settylab/TracyY123-nexus#15`` comment ``5338129631``).
+_OVERLAP_PRIORITY: tuple[str, ...] = (
+    "_original_overlap.png",
+    "_rigid_overlap.png",
+    "_non_rigid_overlap.png",
+    "_micro_reg.png",
+)
+
+#: Human-readable labels for the known VALIS overlap filenames. Files
+#: not in this map render with their bare filename as the label.
+_OVERLAP_LABELS: dict[str, str] = {
+    "_original_overlap.png":  "Original (before registration)",
+    "_rigid_overlap.png":     "After rigid solve",
+    "_non_rigid_overlap.png": "After non-rigid solve",
+    "_micro_reg.png":         "After micro solve",
+}
+
+
 @dataclass
 class _StageInfo:
     """Everything the renderer needs about one promoted stage.
@@ -217,6 +260,24 @@ def _render(*, sample_id: str, run_id: str | None,
     per_stage_rows = "\n".join(_render_stage_row(s) for s in stages)
     lineage_html = _render_lineage(stages)
     thumb_html = _render_thumbnails(sample_id=sample_id, stages=stages)
+    stage_by_name = {s.stage: s for s in stages}
+    register_params_html = _render_stage_params(
+        stage_by_name.get("register"),
+        heading="Registration parameters",
+        highlight_keys=_REGISTER_HIGHLIGHT_KEYS,
+        resolution_keys=(
+            "max_image_dim_px",
+            "max_processed_image_dim_px",
+            "max_non_rigid_registration_dim_px",
+        ),
+    )
+    warp_params_html = _render_stage_params(
+        stage_by_name.get("warp"),
+        heading="Warp parameters",
+        highlight_keys=_WARP_HIGHLIGHT_KEYS,
+        resolution_keys=(),
+    )
+    overlap_html = _render_overlap_figures(stage_by_name.get("register"))
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -245,6 +306,22 @@ def _render(*, sample_id: str, run_id: str | None,
   .thumb {{ max-width: 640px; max-height: 480px; border: 1px solid #ccc;
             display: block; margin: 0.3em 0 1em 0; }}
   ul {{ margin: 0.3em 0 1em 1.5em; padding: 0; }}
+  .chips {{ margin: 0.3em 0 0.5em 0; line-height: 1.9; }}
+  .chip {{ display: inline-block; background: #eef4fb; border: 1px solid #cfd8dc;
+           border-radius: 3px; padding: 0.15em 0.5em; margin-right: 0.4em;
+           font-size: 0.9em; }}
+  .params-dump {{ font-size: 0.88em; margin: 0.3em 0 0.8em 0; }}
+  .params-dump th {{ text-align: right; background: #fafafa;
+                     min-width: 12em; }}
+  details {{ margin: 0.3em 0 1em 0; }}
+  details > summary {{ cursor: pointer; color: #1565c0;
+                       font-size: 0.9em; padding: 0.2em 0; }}
+  .overlap-grid {{ display: grid; grid-template-columns: repeat(auto-fill,
+                     minmax(320px, 1fr)); gap: 1em; margin: 0.3em 0 1em 0; }}
+  .overlap-tile {{ margin: 0; }}
+  .overlap-tile .thumb.overlap {{ max-width: 100%; max-height: 320px;
+                                  margin-bottom: 0.2em; }}
+  .overlap-tile .meta {{ margin: 0; }}
 </style>
 </head>
 <body>
@@ -265,6 +342,12 @@ def _render(*, sample_id: str, run_id: str | None,
 
 <h2>Lineage</h2>
 {lineage_html}
+
+{register_params_html}
+
+{warp_params_html}
+
+{overlap_html}
 
 <h2>Overlay</h2>
 {thumb_html}
@@ -362,6 +445,194 @@ def _render_lineage(stages: list[_StageInfo]) -> str:
             "warp's source_register_run_id does not match output/register</span>"
         )
     return "<ul>\n" + "\n".join(f"  <li>{it}</li>" for it in items) + "\n</ul>"
+
+
+def _render_stage_params(
+    info: _StageInfo | None,
+    *,
+    heading: str,
+    highlight_keys: tuple[str, ...],
+    resolution_keys: tuple[str, ...],
+) -> str:
+    """Render one stage's params as ``<highlights row>`` + ``<details>``
+    with a full key/value dump.
+
+    A3 shape (per Tracy's spec on
+    ``settylab/TracyY123-nexus#15`` comment ``5338129631``):
+    a compact highlights line for the load-bearing keys the operator
+    scans at a glance, plus a collapsible ``<details>`` with every
+    remaining key from ``manifest["params"]`` so nothing is silently
+    hidden.
+
+    ``resolution_keys`` (when non-empty) fold into a single
+    ``resolution: <k1>/<k2>/<k3>`` one-liner in the highlights,
+    because "1500/1500/10000" reads better than three separate rows.
+    """
+    if info is None or info.he_job_id is None or info.manifest is None:
+        return (
+            f"<h2>{html.escape(heading)}</h2>\n"
+            "<p class='none'>(no manifest — stage may not have been "
+            "promoted or was written by an older pipeline version)</p>"
+        )
+    params = info.manifest.get("params") or {}
+    if not params:
+        return (
+            f"<h2>{html.escape(heading)}</h2>\n"
+            "<p class='none'>(manifest present but no params block)</p>"
+        )
+
+    highlight_html = _render_highlight_line(
+        params, highlight_keys, resolution_keys,
+    )
+    full_dump_html = _render_full_params_dump(params)
+
+    return (
+        f"<h2>{html.escape(heading)}</h2>\n"
+        f"{highlight_html}\n"
+        "<details>\n"
+        "  <summary>Full manifest params</summary>\n"
+        f"{full_dump_html}\n"
+        "</details>"
+    )
+
+
+def _render_highlight_line(
+    params: dict[str, Any],
+    highlight_keys: tuple[str, ...],
+    resolution_keys: tuple[str, ...],
+) -> str:
+    """One-line dense summary of the highlight-tier params.
+
+    Missing keys are silently omitted so a run that DIDN'T set a
+    given knob doesn't fabricate a fake value. Resolution keys are
+    folded into a single ``resolution`` chip because their numeric
+    combination is what an operator eyeballs.
+    """
+    chips: list[str] = []
+    for k in highlight_keys:
+        if k not in params:
+            continue
+        v = params[k]
+        chips.append(
+            f"<span class='chip'><code>{html.escape(k)}</code> = "
+            f"<code>{html.escape(_stringify_param_value(v))}</code></span>"
+        )
+    if resolution_keys:
+        present = [k for k in resolution_keys if k in params]
+        if present:
+            joined = "/".join(str(params[k]) for k in present)
+            chips.append(
+                "<span class='chip'><code>resolution</code> = "
+                f"<code>{html.escape(joined)}</code> "
+                "<span class='meta'>("
+                + ", ".join(html.escape(k) for k in present) +
+                ")</span></span>"
+            )
+    if not chips:
+        return "<p class='none'>(no highlight params matched this stage)</p>"
+    return "<p class='chips'>" + " ".join(chips) + "</p>"
+
+
+def _render_full_params_dump(params: dict[str, Any]) -> str:
+    """Two-column table with EVERY key/value from ``params``.
+
+    Sorted by key so the dump is stable across re-renders and
+    diffable. Lists / dicts get repr'd via ``_stringify_param_value``.
+    """
+    rows: list[str] = []
+    for k in sorted(params.keys()):
+        v = params[k]
+        rows.append(
+            "    <tr>"
+            f"<th><code>{html.escape(k)}</code></th>"
+            f"<td><code>{html.escape(_stringify_param_value(v))}</code></td>"
+            "</tr>"
+        )
+    return (
+        "  <table class='params-dump'>\n"
+        + "\n".join(rows)
+        + "\n  </table>"
+    )
+
+
+def _stringify_param_value(v: Any) -> str:
+    """Compact string form of a param value for a table cell.
+
+    ``bool``/``int``/``float``/``str`` render as-is; lists get a
+    compact ``[a, b, c]`` form; anything else falls to ``repr``.
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float, str)):
+        return str(v)
+    if isinstance(v, list):
+        return "[" + ", ".join(_stringify_param_value(x) for x in v) + "]"
+    return repr(v)
+
+
+def _render_overlap_figures(register: _StageInfo | None) -> str:
+    """Discover + link ``register/<he_job_id>/overlaps/*.png`` dynamically.
+
+    Per Tracy's C2 spec: NEVER hardcode the list of overlap files —
+    walk the directory at render time and include whichever PNGs
+    exist. Files in :data:`_OVERLAP_PRIORITY` render in that
+    refinement order first; anything else falls to alphabetical
+    order after. Empty state renders an explicit
+    "no overlap diagnostics" line rather than a broken/blank block.
+    """
+    if register is None or register.he_job_id is None or register.stage_dir is None:
+        return (
+            "<h2>Registration overlap figures</h2>\n"
+            "<p class='none'>(no promoted register run &mdash; "
+            "no overlaps to display)</p>"
+        )
+    overlaps_dir = register.stage_dir / "overlaps"
+    if not overlaps_dir.is_dir():
+        return (
+            "<h2>Registration overlap figures</h2>\n"
+            f"<p class='none'>No overlap diagnostics on disk under "
+            f"<code>{html.escape(str(overlaps_dir.name))}/</code>.</p>"
+        )
+    pngs = sorted(overlaps_dir.glob("*.png"), key=_overlap_sort_key)
+    if not pngs:
+        return (
+            "<h2>Registration overlap figures</h2>\n"
+            "<p class='none'>No overlap diagnostics on disk "
+            "(register may have failed before writing them).</p>"
+        )
+
+    tiles: list[str] = []
+    for png in pngs:
+        rel = f"../register/{register.he_job_id}/overlaps/{png.name}"
+        label = _OVERLAP_LABELS.get(png.name, png.name)
+        tiles.append(
+            "<div class='overlap-tile'>\n"
+            f"  <a href='{html.escape(rel)}'>\n"
+            f"    <img class='thumb overlap' src='{html.escape(rel)}' "
+            f"alt='{html.escape(label)}'>\n"
+            "  </a>\n"
+            f"  <p class='meta'>{html.escape(label)} &mdash; "
+            f"<code>{html.escape(png.name)}</code></p>\n"
+            "</div>"
+        )
+    return (
+        "<h2>Registration overlap figures</h2>\n"
+        "<div class='overlap-grid'>\n"
+        + "\n".join(tiles) +
+        "\n</div>"
+    )
+
+
+def _overlap_sort_key(png_path: Path) -> tuple[int, str]:
+    """Sort key: (priority index, filename). Priority-listed files
+    first in the documented refinement order; unknowns alphabetical
+    after (all get ``len(_OVERLAP_PRIORITY)`` as index so ``sorted``
+    breaks ties by filename)."""
+    name = png_path.name
+    try:
+        return (_OVERLAP_PRIORITY.index(name), name)
+    except ValueError:
+        return (len(_OVERLAP_PRIORITY), name)
 
 
 def _render_thumbnails(*, sample_id: str, stages: list[_StageInfo]) -> str:
