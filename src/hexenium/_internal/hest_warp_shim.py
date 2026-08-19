@@ -24,6 +24,18 @@ default) and pass the resulting ``GeoDataFrame`` to
 ``elif isinstance(shapes, gpd.GeoDataFrame)`` branch and skips the
 broken str-loading path entirely.
 
+Third v1.2.0 gap: HEST main's ``warp_and_save_xenium_objects`` uses
+dask under the hood, and its ``to_parquet`` writes the anonymous
+cell-id index under Dask's ``__null_dask_index__`` sentinel column.
+The hexenium celltype stage
+(``hexenium.stages.celltyping._read_warped_gdf``) is written against
+that shape: ``df.reset_index().rename(columns={"__null_dask_index__":
+"xenium_cell_id"})``. Under v1.2.0's non-dask ``warp_gdf_valis``, our
+plain-pandas ``to_parquet`` produces an unnamed index → the rename
+misses → ``KeyError: 'xenium_cell_id'`` downstream. Fix: name the
+warped GDF's index ``__null_dask_index__`` before writing, so the
+resulting parquet carries the same shape the reader expects.
+
 Scope:
     - Fully implements the cells / nuclei paths — matches the
       hexenium default (``warp.targets: [cells, nuclei]``).
@@ -119,6 +131,44 @@ def _load_xenium_boundaries(parquet_path: str) -> gpd.GeoDataFrame:
     )
 
 
+def _write_warped_parquet_and_geojson(
+    warped: gpd.GeoDataFrame,
+    *,
+    save_dir: str,
+    stem: str,
+    save_parquet: bool,
+    save_geojson: bool,
+) -> None:
+    """Write the shim's warped ``GeoDataFrame`` to disk with the
+    ``__null_dask_index__`` marker on the anonymous cell-id index.
+
+    HEST main's ``warp_and_save_xenium_objects`` runs under Dask, and
+    dask's ``to_parquet`` writes anonymous indices under the sentinel
+    ``__null_dask_index__``. Downstream ``celltyping._read_warped_gdf``
+    reads the parquet with ``df.reset_index().rename(columns={
+    "__null_dask_index__": "xenium_cell_id"})`` — so we need to write
+    that exact column name for the rename to hit.
+
+    Plain-pandas ``to_parquet`` produces an unnamed index (→ column
+    ``index`` after reset), which slips past the rename and crashes
+    at ``gdf["xenium_cell_id"]`` in celltyping. Naming the index
+    matches dask's shape without pulling dask into the write path.
+    """
+    # Copy so we don't mutate the caller's frame; index-name assignment
+    # is cheap but still a mutation.
+    df = warped.copy()
+    df.index.name = "__null_dask_index__"
+    if save_parquet:
+        df.to_parquet(os.path.join(save_dir, f"{stem}.parquet"))
+    if save_geojson:
+        # v1.2.0's `hest.io.seg_readers.write_geojson` requires a
+        # `category_key` column we don't carry; write via geopandas.
+        df.to_file(
+            os.path.join(save_dir, f"{stem}.geojson"),
+            driver="GeoJSON",
+        )
+
+
 def warp_and_save_xenium_objects(
     path_registrar: str,
     dapi_path: str,
@@ -166,17 +216,13 @@ def warp_and_save_xenium_objects(
             path_registrar=path_registrar,
             curr_slide_name=dapi_path,
         )
-        if save_parquet:
-            warped_cells.to_parquet(
-                os.path.join(save_dir, "he_cell_seg.parquet")
-            )
-        if save_geojson:
-            # v1.2.0's `hest.io.seg_readers.write_geojson` requires a
-            # `category_key` column we don't carry; write via geopandas.
-            warped_cells.to_file(
-                os.path.join(save_dir, "he_cell_seg.geojson"),
-                driver="GeoJSON",
-            )
+        _write_warped_parquet_and_geojson(
+            warped_cells,
+            save_dir=save_dir,
+            stem="he_cell_seg",
+            save_parquet=save_parquet,
+            save_geojson=save_geojson,
+        )
 
     if dapi_nuclei is not None:
         if verbose:
@@ -187,12 +233,10 @@ def warp_and_save_xenium_objects(
             path_registrar=path_registrar,
             curr_slide_name=dapi_path,
         )
-        if save_parquet:
-            warped_nuclei.to_parquet(
-                os.path.join(save_dir, "he_nucleus_seg.parquet")
-            )
-        if save_geojson:
-            warped_nuclei.to_file(
-                os.path.join(save_dir, "he_nucleus_seg.geojson"),
-                driver="GeoJSON",
-            )
+        _write_warped_parquet_and_geojson(
+            warped_nuclei,
+            save_dir=save_dir,
+            stem="he_nucleus_seg",
+            save_parquet=save_parquet,
+            save_geojson=save_geojson,
+        )
