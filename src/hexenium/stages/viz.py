@@ -3,9 +3,29 @@
 Produces a per-sample PNG: downsampled H&E in the background, cell
 polygons coloured by classification, nucleus polygons drawn as a darker
 outline. Uses matplotlib + openslide for the H&E thumbnail.
+
+Palette source (precedence, high→low):
+
+  1. ``viz.classification_palette`` YAML override — user's explicit
+     per-label colors always win. Manual overrides let the caller pin
+     specific hues regardless of the upstream palette.
+  2. Upstream xenium-preprocess color map — for the same sample/run
+     pair, ``rctd_split`` writes
+     ``<xenium_run_dir>/summary/<sample_id>_color_map.json`` with a
+     ``first_type`` dict of ``label -> #rrggbb`` used to colour the
+     summary UMAP. When available, hexenium reads it here so the H&E
+     overlay uses the SAME celltype colors as the UMAP that already
+     lives beside the run (Tracy's ask on
+     settylab/TracyY123-nexus#15 comments 5348966457 / 5349046505).
+  3. ``palette_cmap`` fallback (default ``tab20``) — labels not
+     covered by (1) or (2) draw the next unused color from the cmap.
+
+Missing / malformed upstream JSON is a graceful fall-through to the
+cmap; the shim never crashes the viz stage on a palette-source read.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -57,17 +77,89 @@ def _load_he_thumbnail(he_path: Path, max_dim: int) -> tuple[np.ndarray, float]:
         return arr, full_max / max_dim if full_max > max_dim else 1.0
 
 
+def _hex_to_rgb(hex_str: str) -> list[int] | None:
+    """Decode ``#rrggbb`` / ``rrggbb`` to ``[R, G, B]`` (0-255).
+
+    Returns ``None`` on any malformed input rather than raising —
+    the caller silently drops bad entries and falls through to the
+    cmap fallback, so a single corrupt row in the upstream JSON
+    doesn't crash the viz stage.
+    """
+    if not isinstance(hex_str, str):
+        return None
+    s = hex_str.strip().lstrip("#")
+    if len(s) != 6:
+        return None
+    try:
+        return [int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)]
+    except ValueError:
+        return None
+
+
+def _load_upstream_color_map(
+    xenium_run_dir: Path | None,
+    sample_id: str,
+) -> dict[str, list[int]]:
+    """Read the celltype palette that ``rctd_split.qc_report`` persists
+    beside the xenium-preprocess UMAP.
+
+    Path: ``<xenium_run_dir>/summary/<sample_id>_color_map.json``
+    (write site: ``rctd_split.stages.qc_report`` around line 1409).
+    The file's ``first_type`` key holds a ``{label: '#rrggbb'}`` dict.
+
+    Returns a ``{label: [R,G,B]}`` dict when the file is readable and
+    non-empty, else an empty dict. Every failure mode (no
+    ``xenium_run_dir``, missing file, unreadable file, bad JSON,
+    missing ``first_type`` key, malformed hex entries) logs and
+    returns ``{}`` so ``_build_full_palette`` cleanly falls through
+    to the cmap fallback.
+    """
+    if xenium_run_dir is None:
+        return {}
+    path = Path(xenium_run_dir) / "summary" / f"{sample_id}_color_map.json"
+    if not path.exists():
+        log(f"[viz] palette: no upstream color map at {path} — "
+            f"falling back to cmap.")
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        log(f"[viz] palette: could not read upstream color map "
+            f"{path} ({exc!r}) — falling back to cmap.")
+        return {}
+    raw = data.get("first_type") if isinstance(data, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        log(f"[viz] palette: upstream color map at {path} has no "
+            f"non-empty 'first_type' block — falling back to cmap.")
+        return {}
+    out: dict[str, list[int]] = {}
+    for label, hex_str in raw.items():
+        rgb = _hex_to_rgb(hex_str)
+        if rgb is not None:
+            out[str(label)] = rgb
+    log(f"[viz] palette: loaded {len(out)} celltype color(s) from "
+        f"upstream {path}.")
+    return out
+
+
 def _build_full_palette(
     labels,
     user_overrides: dict | None = None,
+    upstream_palette: dict | None = None,
     cmap_name: str = "tab20",
 ) -> dict:
     """Return a dict mapping every label to an [R,G,B] triple in 0-255.
 
     Labels get colors in this precedence order:
       1. User-provided override (from YAML `viz.classification_palette`).
-      2. "Unclassified" defaults to gray [180,180,180] if unspecified.
-      3. Any remaining label draws the next unused color from a
+      2. "Unclassified" defaults to gray [180,180,180] if unspecified
+         by (1).
+      3. Upstream cross-pipeline palette (`upstream_palette` — the
+         xenium-preprocess color map, keyed by celltype label). Fills
+         labels not covered by (1) so the H&E overlay matches the UMAP
+         for the same sample/run.
+      4. Any remaining label draws the next unused color from a
          qualitative matplotlib colormap (`tab20` by default → 20 hues,
          wraps around for more). Assignment order = first-appearance in
          `labels`, so runs are deterministic.
@@ -77,6 +169,7 @@ def _build_full_palette(
     user_overrides = dict(user_overrides or {})
     # Sensible default for "Unclassified" — only used if user hasn't set one.
     user_overrides.setdefault("Unclassified", [180, 180, 180])
+    upstream_palette = upstream_palette or {}
 
     cmap = plt.get_cmap(cmap_name)
     n_cmap = cmap.N if hasattr(cmap, "N") else 20
@@ -91,6 +184,8 @@ def _build_full_palette(
             continue
         if lbl in user_overrides:
             out[lbl] = list(user_overrides[lbl])
+        elif lbl in upstream_palette:
+            out[lbl] = list(upstream_palette[lbl])
         else:
             rgba = cmap(cmap_i % n_cmap)
             out[lbl] = [int(round(rgba[0] * 255)),
@@ -115,6 +210,7 @@ def run_viz(
     palette_cmap: str = "tab20",
     render_boundaries: str = "nucleus",
     force_rerun: bool = False,
+    xenium_run_dir: Path | None = None,
 ) -> Path:
     """Draw warped boundaries on the H&E overlay.
 
@@ -149,21 +245,32 @@ def run_viz(
 
     # Read every actual classification label from the data first (in
     # first-appearance order), then build a palette that covers all of
-    # them — using YAML overrides where present, auto-assigning from
-    # `palette_cmap` where not.
+    # them. Precedence: YAML overrides → upstream xenium-preprocess
+    # color map (matches the summary UMAP for the same sample/run) →
+    # `palette_cmap` fallback for anything still uncovered.
     labels_in_data = gdf["classification"].dropna().unique().tolist()
+    upstream_palette = _load_upstream_color_map(xenium_run_dir, sample_id)
     full_palette = _build_full_palette(
         labels_in_data,
         user_overrides=classification_palette,
+        upstream_palette=upstream_palette,
         cmap_name=palette_cmap,
     )
+    yaml_overrides = classification_palette or {}
+    yaml_matched = [lbl for lbl in labels_in_data if lbl in yaml_overrides]
+    upstream_matched = [lbl for lbl in labels_in_data
+                        if lbl not in yaml_overrides and lbl in upstream_palette]
     auto_labels = [lbl for lbl in labels_in_data
-                   if lbl not in (classification_palette or {})]
+                   if lbl not in yaml_overrides and lbl not in upstream_palette]
+    if yaml_matched:
+        log(f"[viz] palette: {len(yaml_matched)} label(s) from YAML "
+            f"classification_palette: {yaml_matched}")
+    if upstream_matched:
+        log(f"[viz] palette: {len(upstream_matched)} label(s) inherited "
+            f"from upstream xenium color map: {upstream_matched}")
     if auto_labels:
-        log(f"[viz] auto-assigned {len(auto_labels)} celltype(s) from "
-            f"colormap '{palette_cmap}': {auto_labels}")
-    else:
-        log(f"[viz] all {len(labels_in_data)} celltype(s) matched user palette")
+        log(f"[viz] palette: {len(auto_labels)} label(s) auto-assigned "
+            f"from cmap '{palette_cmap}': {auto_labels}")
     log(f"[viz] final palette: {full_palette}")
     classification_palette = full_palette
 

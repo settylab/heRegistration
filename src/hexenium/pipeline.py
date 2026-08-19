@@ -645,6 +645,11 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             palette_cmap=v.get("palette_cmap", "tab20"),
             render_boundaries=v.get("render_boundaries", "nucleus"),
             force_rerun=force_rerun,
+            # Threaded so viz can inherit the celltype palette from the
+            # xenium-preprocess UMAP for the same sample/run — matches
+            # <xenium_run_dir>/summary/<sample>_color_map.json when
+            # present, graceful cmap fallback otherwise.
+            xenium_run_dir=layout.xenium_run_dir,
         )
         banner(f"stage {idx}/{n_stages}: viz — complete in {time.time()-t0:.1f}s")
 
