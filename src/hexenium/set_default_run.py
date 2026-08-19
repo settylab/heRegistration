@@ -26,10 +26,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import os
+from dataclasses import dataclass
+
 from hexenium._internal.logging import log
 from hexenium.manifest import (
     output_symlink_run_id,
     read_manifest,
+    read_symlink_target,
     set_default_symlink,
 )
 
@@ -189,30 +193,205 @@ def _validate_register_warp_lineage(
     log("[set-default-run] WARN: --force-lineage bypass: " + msg)
 
 
+@dataclass
+class _PendingChange:
+    """A single ``output/<stage>`` symlink about to be re-pointed.
+
+    Captured up-front in Phase 0 so both the pre-write guard AND the
+    Phase-2 rollback path have everything they need without another
+    filesystem probe (which would introduce a TOCTOU window).
+    """
+    stage: str
+    link_path: Path
+    tmp_path: Path
+    target_relative: str
+    current_run_id: str | None      # ``output_symlink_run_id`` — for the log msg
+    prior_symlink_target: str | None  # raw ``readlink`` — for rollback
+
+
 def _apply_updates(*, output_dir: Path, provided: dict[str, str]) -> list[str]:
     """Re-point each provided stage's ``output/<stage>`` symlink.
 
-    Iteration is stable across ``STAGES`` (not the ``provided`` dict)
-    so the log order is predictable and diffable. Each update is a
-    tmp-symlink + ``os.replace`` — atomic per-stage; a KeyboardInterrupt
-    between stages leaves each finished stage consistent.
+    Batch-atomic in three phases (skeptic finding F1 on
+    ``settylab/TracyY123-nexus#15``):
+
+    * **Phase 0 — plan + guard.** Build the list of changes in
+      ``STAGES`` order. For each stage that needs a new target, verify
+      the destination is either missing or already a symlink (a
+      real file/dir there would trigger the pre-existing
+      ``set_default_symlink`` ``FileExistsError``, but only after
+      earlier stages had already been re-pointed — so we surface
+      the refusal BEFORE any write). Snapshot each stage's current
+      ``readlink`` target so rollback can restore it byte-identical.
+    * **Phase 1 — prep.** Create ALL tmp symlinks
+      (``output/<stage>.tmp.<pid>``). No live ``output/<stage>`` is
+      touched yet. If any tmp-create fails, unlink the ones we made
+      and raise — ``output/`` unchanged.
+    * **Phase 2 — commit.** ``os.replace`` each tmp → live path in
+      order. On any exception mid-loop, walk back the completed
+      renames and restore each to its prior target (or unlink if
+      the stage had no prior symlink). Best-effort rollback: a
+      rollback-of-rollback failure logs and continues so we don't
+      lose the original exception context.
+
+    ``KeyboardInterrupt`` between Phase-2 renames is caught by the
+    same rollback branch; the operator sees ``output/`` untouched
+    or in its pre-invocation state.
     """
-    changes: list[str] = []
+    plan, unchanged = _build_plan(output_dir=output_dir, provided=provided)
+
+    if not plan:
+        changes = _format_change_log(plan=plan, unchanged=unchanged, provided=provided)
+        for m in changes:
+            log(f"[set-default-run] {m}")
+        return changes
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Phase 1 — create ALL tmp symlinks; on any failure remove partial tmps.
+    created_tmps: list[Path] = []
+    try:
+        for change in plan:
+            _create_tmp_symlink(change.tmp_path, change.target_relative)
+            created_tmps.append(change.tmp_path)
+    except BaseException:
+        for tmp in created_tmps:
+            _best_effort_unlink(tmp)
+        raise
+
+    # Phase 2 — commit each tmp → live path; on any failure roll back.
+    committed: list[_PendingChange] = []
+    try:
+        for change in plan:
+            os.replace(change.tmp_path, change.link_path)
+            committed.append(change)
+    except BaseException:
+        _rollback_committed(committed)
+        # Clean up any tmps that never got renamed (e.g. we failed on
+        # the middle one and later ones are still on disk).
+        renamed_tmps = {c.tmp_path for c in committed}
+        for tmp in created_tmps:
+            if tmp not in renamed_tmps:
+                _best_effort_unlink(tmp)
+        raise
+
+    changes = _format_change_log(plan=plan, unchanged=unchanged, provided=provided)
+    for m in changes:
+        log(f"[set-default-run] {m}")
+    return changes
+
+
+def _build_plan(
+    *, output_dir: Path, provided: dict[str, str],
+) -> tuple[list[_PendingChange], list[tuple[str, str]]]:
+    """Turn ``provided`` into a list of ``_PendingChange`` (needs a write)
+    plus a list of ``(stage, run_id)`` that are already at target.
+
+    Also enforces the "non-symlink obstacle" guard: refuses UP-FRONT
+    if any target ``output/<stage>`` exists but isn't a symlink. This
+    is the F1 skeptic's empirically-most-likely trigger — an operator
+    manually planted a real dir under ``output/`` to inspect a
+    specific run. Refusing here (before any write) preserves batch
+    atomicity that the old per-write ``FileExistsError`` in
+    ``set_default_symlink`` couldn't.
+    """
+    to_change: list[_PendingChange] = []
+    unchanged: list[tuple[str, str]] = []
     for stage in STAGES:
         if stage not in provided:
             continue
         target_run_id = provided[stage]
-        link = output_dir / stage
-        current = output_symlink_run_id(link)
-        target_relative = f"../{stage}/{target_run_id}"
+        link_path = output_dir / stage
+        current = output_symlink_run_id(link_path)
         if current == target_run_id:
-            msg = f"{stage}: unchanged ({target_run_id})"
-        else:
-            set_default_symlink(link, target_relative)
-            msg = f"{stage}: {current!r} -> {target_run_id!r}"
-        changes.append(msg)
-        log(f"[set-default-run] {msg}")
-    return changes
+            unchanged.append((stage, target_run_id))
+            continue
+        if link_path.exists() and not link_path.is_symlink():
+            raise FileExistsError(
+                f"cannot re-point {link_path}: exists and is not a symlink. "
+                f"Refusing to touch any output/ symlink for this batch — "
+                f"investigate and remove {link_path} manually, then re-run."
+            )
+        prior = read_symlink_target(link_path) if link_path.is_symlink() else None
+        to_change.append(_PendingChange(
+            stage=stage,
+            link_path=link_path,
+            tmp_path=link_path.with_name(link_path.name + f".tmp.{os.getpid()}"),
+            target_relative=f"../{stage}/{target_run_id}",
+            current_run_id=current,
+            prior_symlink_target=prior,
+        ))
+    return to_change, unchanged
+
+
+def _create_tmp_symlink(tmp_path: Path, target_relative: str) -> None:
+    """Create the Phase-1 tmp symlink (unlinking any leftover first)."""
+    if tmp_path.exists() or tmp_path.is_symlink():
+        tmp_path.unlink()
+    os.symlink(target_relative, tmp_path)
+
+
+def _rollback_committed(committed: list[_PendingChange]) -> None:
+    """Restore each committed change to its pre-invocation state.
+
+    Best-effort: if a single rollback fails (disk-full mid-rollback,
+    permissions changed after we started), we log and continue so
+    the original Phase-2 exception surfaces with as much of
+    ``output/`` restored as possible.
+    """
+    for change in committed:
+        try:
+            if change.prior_symlink_target is None:
+                change.link_path.unlink()
+            else:
+                _atomic_restore_symlink(
+                    change.link_path, change.prior_symlink_target,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort teardown
+            log(f"[set-default-run] WARN: rollback of {change.stage!r} "
+                f"({change.link_path}) failed: {exc!r}")
+
+
+def _atomic_restore_symlink(link_path: Path, prior_target: str) -> None:
+    """Point ``link_path`` back at ``prior_target`` via tmp + replace."""
+    rb_tmp = link_path.with_name(link_path.name + f".rollback.{os.getpid()}")
+    if rb_tmp.exists() or rb_tmp.is_symlink():
+        rb_tmp.unlink()
+    os.symlink(prior_target, rb_tmp)
+    os.replace(rb_tmp, link_path)
+
+
+def _best_effort_unlink(path: Path) -> None:
+    """``unlink`` that swallows ``FileNotFoundError`` — for cleanup paths."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _format_change_log(
+    *,
+    plan: list[_PendingChange],
+    unchanged: list[tuple[str, str]],
+    provided: dict[str, str],
+) -> list[str]:
+    """Emit change-log lines in canonical ``STAGES`` order.
+
+    Merges the "unchanged" and "changed" sets back into a single
+    stable-ordered list so the log reads the same regardless of
+    which stages were passed. Preserves the log surface the
+    existing tests assert on (``'unchanged' in change``).
+    """
+    unchanged_map = dict(unchanged)
+    plan_map = {c.stage: c for c in plan}
+    lines: list[str] = []
+    for stage in STAGES:
+        if stage in unchanged_map:
+            lines.append(f"{stage}: unchanged ({unchanged_map[stage]})")
+        elif stage in plan_map:
+            c = plan_map[stage]
+            lines.append(f"{stage}: {c.current_run_id!r} -> {provided[stage]!r}")
+    return lines
 
 
 def format_changes(result: SetDefaultResult) -> str:

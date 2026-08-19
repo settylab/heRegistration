@@ -319,22 +319,111 @@ class TestValidatePromotionLineageDirect:
 # that exercises the flag gate, without actually running any stage).
 # ---------------------------------------------------------------------
 class TestOptOut:
-    def test_flag_off_never_touches_output(self, he_root: Path):
-        # Simulate the tail of pipeline.run() with the flag unset. The
-        # gate is a simple `if cfg.get("set_default_on_success"):`, so
-        # verifying that ``output/`` does not exist after the pipeline
-        # tail comes down to asserting that the flag guard covers it.
-        # Direct pytest: don't call the promote helper.
-        # (The tail of pipeline.run() calls _promote_completed_run only
-        # when the flag is truthy — verified by inspection at
-        # pipeline.py:_promote_completed_run's call site.)
-        cfg_flag_off = {}
-        assert not cfg_flag_off.get("set_default_on_success")
-        assert not (he_root / "output").exists()
+    """Opt-out semantics — no flag = ``output/`` never touched even
+    across a full ``pipeline.run()`` invocation.
 
-    def test_flag_on_touches_output(self, he_root: Path):
-        # Parity check for the opt-in path: with the flag set (and
-        # valid inputs), the promote hook produces the output/ tree.
+    F2 skeptic finding on ``settylab/TracyY123-nexus#15``: the earlier
+    version of this test asserted trivial facts and never called
+    ``pipeline.run()`` — so a regression that moved / mis-gated the
+    promote hook could pass CI silently. These tests invoke the real
+    ``pipeline.run`` with an empty ``--stages`` list (which exercises
+    the tail — layout + banner + config snapshot + the promote gate
+    — without needing VALIS/HEST). The gate is verified by spying on
+    ``_promote_completed_run``.
+    """
+
+    def _minimal_pipeline_inputs(self, tmp_path: Path) -> tuple:
+        """Shared fixture body — the smallest set of on-disk inputs
+        that lets ``pipeline.run(cfg, stages=[])`` run to completion
+        (registers no stage, but exercises the tail-of-run promote
+        gate we're testing)."""
+        from hexenium.config import deep_update, load_default
+        he_path = tmp_path / "he.ome.tif"
+        he_path.touch()
+        bundle = tmp_path / "output-XETG"
+        bundle.mkdir()
+        output_root = tmp_path / "runs"
+        output_root.mkdir()
+        cfg = deep_update(load_default(), {
+            "sample_id": "S1",
+            "output_root": str(output_root),
+            "he_path": str(he_path),
+            "xenium_bundle": str(bundle),
+        })
+        return cfg, output_root
+
+    def test_flag_off_pipeline_run_never_calls_promote(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        from hexenium import pipeline
+        called: list[dict] = []
+        monkeypatch.setattr(
+            pipeline, "_promote_completed_run",
+            lambda **kw: called.append(kw),
+        )
+
+        cfg, output_root = self._minimal_pipeline_inputs(tmp_path)
+        # Flag explicitly UNSET.
+        assert "set_default_on_success" not in cfg
+
+        rc = pipeline.run(cfg, stages=[], argv=["hexenium", "run"])
+        assert rc == 0
+        assert called == []  # promote hook never fired
+        # No output/ subdir created either.
+        assert not (output_root / "S1" / "output").exists()
+
+    def test_flag_off_explicit_false_pipeline_run_never_calls_promote(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # Same as above but with the key EXPLICITLY set to False —
+        # covers the edge case where CLI wiring changes to always
+        # write the key.
+        from hexenium import pipeline
+        called: list[dict] = []
+        monkeypatch.setattr(
+            pipeline, "_promote_completed_run",
+            lambda **kw: called.append(kw),
+        )
+
+        cfg, output_root = self._minimal_pipeline_inputs(tmp_path)
+        cfg["set_default_on_success"] = False
+
+        pipeline.run(cfg, stages=[], argv=["hexenium", "run"])
+        assert called == []
+        assert not (output_root / "S1" / "output").exists()
+
+    def test_flag_on_pipeline_run_calls_promote(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        # Parity check: with the flag ON, ``pipeline.run`` reaches the
+        # promote hook (regardless of what it does inside — we spy on
+        # entry, not on ``set_default_run`` behavior which has its
+        # own suite).
+        from hexenium import pipeline
+        called: list[dict] = []
+        monkeypatch.setattr(
+            pipeline, "_promote_completed_run",
+            lambda **kw: called.append(kw),
+        )
+
+        cfg, output_root = self._minimal_pipeline_inputs(tmp_path)
+        cfg["set_default_on_success"] = True
+
+        pipeline.run(cfg, stages=[], argv=["hexenium", "run"])
+        assert len(called) == 1
+        # Kwargs shape as the real hook expects.
+        assert set(called[0].keys()) == {
+            "layout", "cfg", "stages_ran", "source_register_run_id",
+        }
+        assert called[0]["stages_ran"] == []
+        assert called[0]["source_register_run_id"] is None
+
+    def test_promote_helper_still_writes_output_when_invoked_directly(
+        self, he_root: Path,
+    ):
+        # Kept from the previous version — verifies the helper itself
+        # works when its inputs are valid. Complements the gate tests
+        # above (gate + downstream, both covered).
         _seed_stage(he_root, "register", "job_new")
         _seed_stage(he_root, "warp", "job_new",
                     extra={"source_register_run_id": "job_new"})

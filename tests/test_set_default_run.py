@@ -242,3 +242,142 @@ class TestMissingTargets:
         with pytest.raises(SystemExit) as exc:
             set_default_run(output_root_he=he_root)
         assert "at least one" in str(exc.value)
+
+
+# ---------------------------------------------------------------------
+# Batch atomicity — F1 skeptic finding on
+# ``settylab/TracyY123-nexus#15``: the previous per-stage-atomic writer
+# left ``output/`` split-brain (register updated, warp raised,
+# celltyped/viz stale) when a stage mid-batch hit an obstacle. The
+# rewrite is three-phase (plan → tmp → commit) with rollback.
+# ---------------------------------------------------------------------
+class TestBatchAtomicity:
+    def test_non_symlink_obstacle_refuses_upfront_leaving_others_untouched(
+        self, he_root: Path,
+    ):
+        # Reproduces the skeptic's split-brain scenario: seed output/
+        # with a valid register+warp+celltyped+viz, then plant a real
+        # directory at output/warp (as if the operator hand-copied a
+        # run out for inspection). The next set_default_run must
+        # refuse the WHOLE batch and leave the OTHER three symlinks
+        # exactly where they were.
+        set_default_run(
+            output_root_he=he_root,
+            register_run_id="reg_A",
+            warp_run_id="warp_A",
+            celltyped_run_id="ct_A",
+            viz_run_id="viz_A",
+        )
+        # Now plant the obstacle (delete the symlink, mkdir a real dir).
+        obstacle = he_root / "output" / "warp"
+        obstacle.unlink()
+        obstacle.mkdir()
+        (obstacle / "operator-notes.txt").write_text("hand-copied for review\n")
+
+        # Seed a second full set of runs to point at.
+        _seed_stage(he_root, "register", "reg_B")
+        _seed_stage(he_root, "warp", "warp_B",
+                    extra={"source_register_run_id": "reg_B"})
+        _seed_stage(he_root, "celltyped", "ct_B")
+        _seed_stage(he_root, "viz", "viz_B")
+
+        with pytest.raises(FileExistsError) as exc:
+            set_default_run(
+                output_root_he=he_root,
+                register_run_id="reg_B",
+                warp_run_id="warp_B",
+                celltyped_run_id="ct_B",
+                viz_run_id="viz_B",
+            )
+        assert "not a symlink" in str(exc.value)
+
+        # The other three symlinks must be UNTOUCHED (still point at *_A).
+        assert output_symlink_run_id(he_root / "output" / "register") == "reg_A"
+        assert output_symlink_run_id(he_root / "output" / "celltyped") == "ct_A"
+        assert output_symlink_run_id(he_root / "output" / "viz") == "viz_A"
+        # The obstacle stays as-is — the writer never touched it.
+        assert obstacle.is_dir()
+        assert (obstacle / "operator-notes.txt").read_text() \
+            == "hand-copied for review\n"
+
+    def test_phase2_rename_failure_rolls_back(
+        self, he_root: Path, monkeypatch,
+    ):
+        # Simulate a mid-batch Phase-2 failure (disk-full / permission
+        # change / TOCTOU). Force ``os.replace`` to succeed for the
+        # first change and raise for the second; the rollback path
+        # must restore the first change to its prior target so
+        # ``output/`` ends up exactly where it started.
+        set_default_run(
+            output_root_he=he_root,
+            register_run_id="reg_A",
+            warp_run_id="warp_A",
+            celltyped_run_id="ct_A",
+            viz_run_id="viz_A",
+        )
+        _seed_stage(he_root, "register", "reg_B")
+        _seed_stage(he_root, "warp", "warp_B",
+                    extra={"source_register_run_id": "reg_B"})
+
+        # ``os.replace`` is called MANY times inside pytest (its own
+        # test harness uses it too), so wrap by matching on the target
+        # basename we care about.
+        import os as _real_os
+        original_replace = _real_os.replace
+        call_seen = {"count": 0}
+        def failing_replace(src, dst, *a, **kw):
+            dst_name = os.path.basename(os.fspath(dst))
+            if dst_name in ("register", "warp"):
+                call_seen["count"] += 1
+                if call_seen["count"] == 2:
+                    raise OSError("simulated disk-full mid-batch")
+            return original_replace(src, dst, *a, **kw)
+        monkeypatch.setattr("hexenium.set_default_run.os.replace",
+                            failing_replace)
+
+        with pytest.raises(OSError, match="simulated disk-full"):
+            set_default_run(
+                output_root_he=he_root,
+                register_run_id="reg_B",
+                warp_run_id="warp_B",
+            )
+        # Both symlinks must have been rolled back to *_A.
+        assert output_symlink_run_id(he_root / "output" / "register") == "reg_A"
+        assert output_symlink_run_id(he_root / "output" / "warp") == "warp_A"
+        # No stray tmp / rollback files left behind.
+        stray = sorted(p.name for p in (he_root / "output").iterdir()
+                       if ".tmp." in p.name or ".rollback." in p.name)
+        assert stray == []
+
+    def test_partial_provided_still_atomic(self, he_root: Path, monkeypatch):
+        # Even when the batch is only two stages, a Phase-2 mid-batch
+        # failure must roll the first back.
+        set_default_run(
+            output_root_he=he_root,
+            celltyped_run_id="ct_A",
+            viz_run_id="viz_A",
+        )
+        _seed_stage(he_root, "celltyped", "ct_B")
+        _seed_stage(he_root, "viz", "viz_B")
+
+        import os as _real_os
+        original_replace = _real_os.replace
+        call_seen = {"count": 0}
+        def failing_replace(src, dst, *a, **kw):
+            dst_name = os.path.basename(os.fspath(dst))
+            if dst_name in ("celltyped", "viz"):
+                call_seen["count"] += 1
+                if call_seen["count"] == 2:
+                    raise OSError("phase-2 fault")
+            return original_replace(src, dst, *a, **kw)
+        monkeypatch.setattr("hexenium.set_default_run.os.replace",
+                            failing_replace)
+
+        with pytest.raises(OSError, match="phase-2 fault"):
+            set_default_run(
+                output_root_he=he_root,
+                celltyped_run_id="ct_B",
+                viz_run_id="viz_B",
+            )
+        assert output_symlink_run_id(he_root / "output" / "celltyped") == "ct_A"
+        assert output_symlink_run_id(he_root / "output" / "viz") == "viz_A"
