@@ -34,9 +34,22 @@ from hexenium.manifest import (
     write_manifest,
 )
 from hexenium.summary_html import (
+    _EMBED_MAX_DIM_PX,
     _EXPECTED_ARTIFACTS,
     render_summary_html,
 )
+
+
+def _write_png(
+    path: Path, *, size: tuple[int, int] = (64, 64), colour=(200, 50, 50),
+) -> None:
+    """Write a real PNG at ``path``. Needed since the renderer now
+    embeds via PIL and would fail-and-degrade on a zero-byte touched
+    file. Size defaults tiny — tests that need large images pass
+    explicit ``size``."""
+    from PIL import Image
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, colour).save(path, format="PNG")
 
 
 def _seed_stage(root: Path, stage_dir_name: str, run_id: str, *,
@@ -66,7 +79,10 @@ def _seed_stage(root: Path, stage_dir_name: str, run_id: str, *,
     for rel in artifact_files or []:
         art = d / rel
         art.parent.mkdir(parents=True, exist_ok=True)
-        art.touch()
+        if rel.endswith(".png"):
+            _write_png(art)  # real PNG so the embed path works
+        else:
+            art.touch()
     return d
 
 
@@ -154,18 +170,19 @@ class TestHappyPath:
         assert "lineage OK" in content
         assert "MISMATCH" not in content
 
-    def test_linked_thumbnail_relative_path(self, he_root: Path):
-        # Tracy chose LINKED thumbnails (not self-contained base64)
-        # so the HTML must reference the overlay via a relative
-        # ``../viz/<he_job_id>/<sample>_overlay.png`` path.
+    def test_viz_overlay_embedded_as_data_uri(self, he_root: Path):
+        # Tracy reversed the linked-thumbnails preference on comment
+        # 5346844112 — the HTML is now self-contained, ALL figures
+        # embedded inline as base64 data URIs (no relative refs).
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
         content = dest.read_text()
-        assert "src='../viz/viz_A/S1_overlay.png'" in content
-        assert "href='../viz/viz_A/S1_overlay.png'" in content
-        # No base64-embedded image.
-        assert "base64," not in content
+        # The viz overlay renders as an inline data URI.
+        assert "src='data:image/png;base64," in content
+        # No relative ../viz/... path from the img/src pair.
+        assert "src='../viz/" not in content
+        assert "href='../viz/" not in content
 
 
 # ---------------------------------------------------------------------
@@ -373,22 +390,27 @@ class TestOverlapFigures:
         self, he_root: Path,
     ):
         # Plant the four canonical VALIS overlap PNGs under the
-        # promoted register run; assert every one gets an <img>.
+        # promoted register run; assert every one gets an <img>
+        # embedded inline (comment 5346844112 — self-contained HTML).
         overlaps = he_root / "register" / "reg_A" / "overlaps"
-        overlaps.mkdir(parents=True)
         for name in ("_original_overlap.png", "_rigid_overlap.png",
                      "_non_rigid_overlap.png", "_micro_reg.png"):
-            (overlaps / name).touch()
+            _write_png(overlaps / name)
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
         content = dest.read_text()
 
         assert "<h2>Registration overlap figures</h2>" in content
-        # Each file gets a linked thumbnail via a relative path.
+        # Filename appears in the tile's meta caption for each PNG.
         for name in ("_original_overlap.png", "_rigid_overlap.png",
                      "_non_rigid_overlap.png", "_micro_reg.png"):
-            assert f"../register/reg_A/overlaps/{name}" in content
+            assert f"<code>{name}</code>" in content
+        # Every overlap is inline (four data-URI srcs on this page,
+        # plus the viz overlay).
+        assert content.count("src='data:image/png;base64,") >= 4
+        # No filesystem refs to the overlap files.
+        assert "../register/reg_A/overlaps/" not in content
         # Labels come from _OVERLAP_LABELS.
         assert "Original (before registration)" in content
         assert "After rigid solve" in content
@@ -399,9 +421,8 @@ class TestOverlapFigures:
         # rigid_only mode produces only two overlays; C2 says the
         # HTML must show ONLY those two, not fabricate the missing pair.
         overlaps = he_root / "register" / "reg_A" / "overlaps"
-        overlaps.mkdir(parents=True)
-        (overlaps / "_original_overlap.png").touch()
-        (overlaps / "_rigid_overlap.png").touch()
+        _write_png(overlaps / "_original_overlap.png")
+        _write_png(overlaps / "_rigid_overlap.png")
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
@@ -421,10 +442,9 @@ class TestOverlapFigures:
         # produce a deterministic display order (rigid before nonrigid,
         # etc.). Plant in reverse alphabetical to force the point.
         overlaps = he_root / "register" / "reg_A" / "overlaps"
-        overlaps.mkdir(parents=True)
         for name in ("_rigid_overlap.png", "_original_overlap.png",
                      "_non_rigid_overlap.png", "_micro_reg.png"):
-            (overlaps / name).touch()
+            _write_png(overlaps / name)
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
@@ -446,11 +466,10 @@ class TestOverlapFigures:
         # requires we still surface it (dynamic discovery is source
         # of truth), just after the known ones in alphabetical order.
         overlaps = he_root / "register" / "reg_A" / "overlaps"
-        overlaps.mkdir(parents=True)
-        (overlaps / "_original_overlap.png").touch()
-        (overlaps / "_rigid_overlap.png").touch()
-        (overlaps / "aaa_unknown_extra.png").touch()  # sorts BEFORE known if pure alpha
-        (overlaps / "zzz_unknown_extra.png").touch()
+        _write_png(overlaps / "_original_overlap.png")
+        _write_png(overlaps / "_rigid_overlap.png")
+        _write_png(overlaps / "aaa_unknown_extra.png")  # sorts BEFORE known if pure alpha
+        _write_png(overlaps / "zzz_unknown_extra.png")
         dest = render_summary_html(
             output_root_he=he_root, sample_id="S1", run_id="demo_v1",
         )
@@ -476,8 +495,131 @@ class TestOverlapFigures:
         content = dest.read_text()
         assert "<h2>Registration overlap figures</h2>" in content
         assert "No overlap diagnostics on disk" in content
-        # No dangling <img> tag from a phantom overlay.
-        assert "src='../register/reg_A/overlaps/" not in content
+        # No overlap-tile <img> tags on this page — the section is
+        # empty. (The viz overlay above may still emit its own.)
+        overlap_heading = content.index("<h2>Registration overlap figures</h2>")
+        overlap_section = content[overlap_heading:content.index("<h2>", overlap_heading + 1)]
+        assert "<img" not in overlap_section
+
+    # -----------------------------------------------------------------
+    # Self-contained-HTML semantics (Tracy's reversal on
+    # settylab/TracyY123-nexus#15 comment 5346844112). Images ship
+    # inline as base64 data URIs so the HTML survives moves / emails.
+    # -----------------------------------------------------------------
+    def test_overlap_images_are_base64_data_uris(self, he_root: Path):
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        _write_png(overlaps / "_original_overlap.png")
+        _write_png(overlaps / "_rigid_overlap.png")
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        # Extract every <img src='...'> URI on the page and assert
+        # each is a data-URI (no bare relative refs).
+        import re
+        srcs = re.findall(r"<img[^>]+src='([^']+)'", content)
+        assert srcs, "expected at least one <img src=...> in the HTML"
+        for src in srcs:
+            assert src.startswith("data:image/png;base64,"), (
+                f"expected data-URI src, got {src[:80]!r}..."
+            )
+
+    def test_html_is_self_contained_no_external_paths_in_images(
+        self, he_root: Path,
+    ):
+        # No <img src=...> pointing at ../ (or /) — the whole
+        # promise of self-contained HTML.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        for name in ("_original_overlap.png", "_rigid_overlap.png",
+                     "_non_rigid_overlap.png", "_micro_reg.png"):
+            _write_png(overlaps / name)
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        import re
+        srcs = re.findall(r"<img[^>]+src='([^']+)'", content)
+        for src in srcs:
+            assert not src.startswith("../"), f"relative path leaked: {src!r}"
+            assert not src.startswith("/"), f"absolute path leaked: {src!r}"
+        # Nor any <a href='../...'> anchor wrapping the images
+        # (previous linked-mode leftover).
+        assert "href='../register/" not in content
+        assert "href='../viz/" not in content
+
+    def test_large_images_are_downscaled_before_embedding(
+        self, he_root: Path,
+    ):
+        # Plant a full-VALIS-sized 4000x4000 PNG. After downscale +
+        # PNG re-encode, its embedded payload MUST fit under a sane
+        # per-image cap (500 KiB of base64 = ~375 KiB of PNG bytes).
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        _write_png(overlaps / "_rigid_overlap.png", size=(4000, 4000))
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        import re
+        srcs = re.findall(r"<img[^>]+src='(data:image/png;base64,[^']+)'", content)
+        # Isolate the specific overlap payload (per _EMBED_MAX_DIM_PX
+        # the downscaled size should be well under the cap).
+        cap_kib = 500
+        for src in srcs:
+            payload_len = len(src) - len("data:image/png;base64,")
+            assert payload_len < cap_kib * 1024, (
+                f"embedded payload {payload_len} B exceeds {cap_kib} KiB cap"
+            )
+
+    def test_zero_images_still_shows_no_diagnostics_message(
+        self, he_root: Path,
+    ):
+        # Regression guard for the graceful-degradation path under
+        # the new embed regime.
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        assert "No overlap diagnostics on disk" in content
+
+    def test_output_html_size_reasonable(self, he_root: Path):
+        # Overall HTML must stay under a sane cap even with all four
+        # embedded overlays + viz overlay. Cap = 5 MiB; downscaled
+        # thumbnails should produce a ~1-2 MiB doc.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        for name in ("_original_overlap.png", "_rigid_overlap.png",
+                     "_non_rigid_overlap.png", "_micro_reg.png"):
+            _write_png(overlaps / name, size=(4000, 4000))
+        # Also make the viz overlay large.
+        _write_png(he_root / "viz" / "viz_A" / "S1_overlay.png",
+                   size=(4000, 4000))
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        size_bytes = dest.stat().st_size
+        cap_mib = 5
+        assert size_bytes < cap_mib * 1024 * 1024, (
+            f"HTML at {size_bytes / (1024 * 1024):.2f} MiB exceeds "
+            f"{cap_mib} MiB cap"
+        )
+
+    def test_corrupt_png_degrades_gracefully(self, he_root: Path):
+        # A zero-byte or non-PNG file at overlaps/*.png must not
+        # sink the whole render — the other overlays + the rest of
+        # the summary still land, and the bad tile emits a
+        # "could not embed" placeholder.
+        overlaps = he_root / "register" / "reg_A" / "overlaps"
+        _write_png(overlaps / "_rigid_overlap.png")
+        (overlaps / "_micro_reg.png").parent.mkdir(parents=True, exist_ok=True)
+        (overlaps / "_micro_reg.png").write_text("not a real PNG")
+        dest = render_summary_html(
+            output_root_he=he_root, sample_id="S1", run_id="demo_v1",
+        )
+        content = dest.read_text()
+        # Good file still embedded.
+        assert "src='data:image/png;base64," in content
+        # Bad file gets a placeholder; no fake <img> for it.
+        assert "could not embed" in content
+        assert "_micro_reg.png" in content  # filename mentioned in placeholder
 
     def test_no_promoted_register_shows_placeholder(self, tmp_path: Path):
         # Fresh he_root with no promoted register at all; the section

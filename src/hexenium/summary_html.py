@@ -29,7 +29,9 @@ failures LOG loudly and re-raise but do NOT touch the symlinks
 """
 from __future__ import annotations
 
+import base64
 import html
+import io
 import os
 import time
 from dataclasses import dataclass, field
@@ -42,6 +44,16 @@ from hexenium.manifest import (
     output_symlink_run_id,
     read_manifest,
 )
+
+
+#: Max side length in px for embedded overlap / viz thumbnails.
+#: VALIS overlap PNGs at full-res are 10-30MB each; embedding four of
+#: them raw would produce 100+MB HTML that crashes browsers. 800px on
+#: the longer edge is a QA-legible size at ~200KB per PNG post-encode
+#: (rough — depends on content complexity). Tracy asked for self-contained
+#: HTML on settylab/TracyY123-nexus#15 comment 5346844112; this cap is
+#: what makes that promise practical.
+_EMBED_MAX_DIM_PX = 800
 
 
 #: Stage → dirname mapping; matches ``pipeline._PROMOTE_STAGE_DIR`` but
@@ -603,14 +615,23 @@ def _render_overlap_figures(register: _StageInfo | None) -> str:
 
     tiles: list[str] = []
     for png in pngs:
-        rel = f"../register/{register.he_job_id}/overlaps/{png.name}"
         label = _OVERLAP_LABELS.get(png.name, png.name)
+        data_uri = _image_to_data_uri(png)
+        if not data_uri:
+            # Graceful degradation: PIL failed on this specific PNG.
+            # Emit a placeholder tile instead of a broken <img> so the
+            # rest of the section still reads cleanly.
+            tiles.append(
+                "<div class='overlap-tile'>\n"
+                "  <p class='none'>(could not embed "
+                f"<code>{html.escape(png.name)}</code> &mdash; see log)</p>\n"
+                "</div>"
+            )
+            continue
         tiles.append(
             "<div class='overlap-tile'>\n"
-            f"  <a href='{html.escape(rel)}'>\n"
-            f"    <img class='thumb overlap' src='{html.escape(rel)}' "
+            f"  <img class='thumb overlap' src='{data_uri}' "
             f"alt='{html.escape(label)}'>\n"
-            "  </a>\n"
             f"  <p class='meta'>{html.escape(label)} &mdash; "
             f"<code>{html.escape(png.name)}</code></p>\n"
             "</div>"
@@ -645,19 +666,79 @@ def _render_thumbnails(*, sample_id: str, stages: list[_StageInfo]) -> str:
     """
     stage_by_name = {s.stage: s for s in stages}
     v = stage_by_name.get("viz")
-    if v is None or v.he_job_id is None:
+    if v is None or v.he_job_id is None or v.stage_dir is None:
         return "<p class='none'>viz not promoted &mdash; no overlay to show.</p>"
-    overlay_rel = f"../viz/{v.he_job_id}/{sample_id}_overlay.png"
-    return (
-        f"<a href='{html.escape(overlay_rel)}'>"
-        f"<img class='thumb' src='{html.escape(overlay_rel)}' alt='overlay'>"
-        f"</a>"
-    )
+    overlay_path = v.stage_dir / f"{sample_id}_overlay.png"
+    if not overlay_path.exists():
+        return (
+            f"<p class='none'>viz overlay expected at "
+            f"<code>{html.escape(overlay_path.name)}</code> but the file is "
+            "missing on disk &mdash; see the missing-file flag on the "
+            "per-stage summary above.</p>"
+        )
+    data_uri = _image_to_data_uri(overlay_path)
+    if not data_uri:
+        return (
+            "<p class='none'>viz overlay present on disk but could not be "
+            "embedded &mdash; see log for details.</p>"
+        )
+    return f"<img class='thumb' src='{data_uri}' alt='overlay'>"
 
 
 # ---------------------------------------------------------------------
 # Atomic write
 # ---------------------------------------------------------------------
+def _image_to_data_uri(path: Path, *, max_dim: int = _EMBED_MAX_DIM_PX) -> str:
+    """Downscale + re-encode ``path`` as a ``data:image/png;base64,…`` URI.
+
+    Tracy's self-contained-HTML ask (comment ``5346844112``) means we
+    embed every figure inline. The downscale keeps output size sane —
+    a full-res VALIS overlap PNG can be 20+ MB; at 800px longer edge
+    it's typically <300 KB after PNG re-encode.
+
+    Returns ``""`` on any read/decode failure — callers should detect
+    the empty result and either skip the image or emit a placeholder.
+    Logs the pre/post byte sizes so a future compression regression is
+    visible in the pipeline log without a rerun. All exceptions from
+    PIL are caught and surfaced as WARN + empty string, so a corrupted
+    or truncated PNG can't take down the whole HTML render — the rest
+    of the summary still lands.
+    """
+    try:
+        from PIL import Image  # imported lazily so tests that don't
+                               # touch images don't need PIL loaded.
+    except ImportError as exc:
+        log(f"[summary-html] WARN: PIL not available; cannot embed "
+            f"{path}: {exc!r}")
+        return ""
+    try:
+        raw_size = path.stat().st_size
+        with Image.open(path) as img:
+            img.load()
+            w, h = img.size
+            if max(w, h) > max_dim:
+                scale = max_dim / float(max(w, h))
+                # Round to int, keep aspect ratio.
+                new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+                img = img.resize(new_size, Image.LANCZOS)
+            # Force-drop alpha for PNG optim; VALIS overlaps are RGB
+            # composites but be defensive against RGBA/P modes.
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+        log(f"[summary-html] embedded {path.name}: "
+            f"{raw_size / 1024:.0f} KiB on disk -> "
+            f"{len(buf.getvalue()) / 1024:.0f} KiB embedded "
+            f"({img.size[0]}x{img.size[1]}px after downscale)")
+        return f"data:image/png;base64,{encoded}"
+    except Exception as exc:  # noqa: BLE001 — one image failing must
+        # not sink the whole HTML render; degrade gracefully.
+        log(f"[summary-html] WARN: could not embed {path}: {exc!r}")
+        return ""
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` via tmp + ``os.replace``.
 
