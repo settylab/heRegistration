@@ -420,6 +420,26 @@ def main(argv: list[str] | None = None) -> int:
             force_lineage=args.force_lineage,
         )
         print(format_changes(result))
+        # Regenerate summary.html — the symlink promotion above is
+        # atomic and already committed; a render failure here logs
+        # LOUDLY (via summary_html itself) but must NOT roll back
+        # the symlinks. Tracy's green-light:
+        # settylab/TracyY123-nexus#15 comment 5337905668.
+        try:
+            from hexenium.summary_html import render_summary_html
+            render_summary_html(
+                output_root_he=output_root_he,
+                sample_id=args.sample_id,
+                run_id=args.run_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — post-commit log-and-continue
+            import sys as _sys
+            print(
+                f"WARN: set-default-run committed symlink changes but "
+                f"summary.html render failed: {exc!r}. Re-run to "
+                f"regenerate.",
+                file=_sys.stderr,
+            )
         return 0
     raise SystemExit(f"unknown command: {args.cmd}")
 

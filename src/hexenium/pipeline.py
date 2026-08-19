@@ -196,11 +196,23 @@ def _promote_completed_run(
         f"{ {k: v for k, v in kwargs.items() if v} }")
     result = set_default_run(output_root_he=layout.output_root_he, **kwargs)
     log("[promote] output/ updated:\n" + format_changes(result))
-    # TODO: regenerate summary.html here once the renderer lands. The
-    # earlier design proposal in
-    # settylab/TracyY123-nexus#15 issuecomment-5334874062 sketched
-    # `render_summary_html(layout, cfg, metrics)`; not yet
-    # implemented (still on the deferred list from the impl pass).
+
+    # Regenerate summary.html — the promotion above is atomic and
+    # already committed; if the renderer fails, log LOUDLY but do NOT
+    # roll back the symlinks (they're the source of truth). Tracy's
+    # green-light: settylab/TracyY123-nexus#15 comment 5337905668.
+    try:
+        from hexenium.summary_html import render_summary_html
+        render_summary_html(
+            output_root_he=layout.output_root_he,
+            sample_id=layout.sample_id,
+            run_id=layout.xenium_run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — post-commit, log-and-continue
+        log(f"[promote] ERROR: summary.html render failed after successful "
+            f"symlink promotion: {exc!r}. The output/ symlinks are the "
+            f"source of truth and remain unchanged; re-run "
+            f"`hexenium set-default-run` to regenerate summary.html.")
 
 
 def _resolve_promotion_ids(
