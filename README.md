@@ -711,6 +711,98 @@ non-rigid + micro solve at `max_non_rigid_registration_dim_px = 10000`
 plus the Dask warp cluster; drop to 128 GB only if you also drop that
 cap.
 
+### Path B — pre-convert a VSI to OME-TIFF (BioFormats path)
+
+`he_preprocess` uses OpenSlide's Olympus VSI reader, which doesn't
+cover every VSI subtype. Files where
+`openslide.OpenSlide(<vsi>)` raises `OpenSlideUnsupportedFormatError`
+(or `detect_vendor(...)` returns `None`) need to be converted with
+BioFormats-backed tools instead. **Path B is the two-step
+sbatch workflow for that case** — convert once, run hexenium
+against the OME-TIFF as many times as you like:
+
+**Step 1 — one-time tool install** (per env):
+
+```bash
+micromamba activate heRegistration
+mamba install -c conda-forge bioformats2raw raw2ometiff c-blosc -y
+```
+
+If conda-forge is unreachable, drop the Glencoe Software zips
+into a scratch dir and export `BFTOOLS_ROOT` + `LIBBLOSC_DIR`
+(the sbatch scripts pick them up automatically):
+
+```bash
+TOOL=/path/to/scratch/bftools; mkdir -p $TOOL && cd $TOOL
+curl -L -O https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
+curl -L -O https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
+unzip -q bioformats2raw-0.12.1.zip && unzip -q raw2ometiff-0.9.0.zip
+export BFTOOLS_ROOT=$TOOL
+export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
+```
+
+**Step 2 — convert VSI → OME-TIFF (`scripts/submit_vsi_to_ometiff.sh`)**:
+
+```bash
+./scripts/submit_vsi_to_ometiff.sh \
+    --vsi         /path/to/SAMPLE.vsi \
+    --out-dir     /path/to/converted \
+    --sample-id   SAMPLE \
+    [--env-name   heRegistration]     # default; override for -v3/etc.
+```
+
+Prints `Submitted batch job <jobid>` and routes logs to
+`<out-dir>/logs/SAMPLE_vsi2ometiff_<jobid>.{out,err}`. Wall-clock is
+~15-25 min for a ~3 GB Olympus WSI on a `campus-new` node.
+
+The script uses `raw2ometiff --split`, so per-series OME-TIFF files
+land at `<out-dir>/SAMPLE_he_s<N>.ome.tiff`. For Olympus 40x
+brightfield scans, `s2` is almost always the full-resolution image
+(the other series are label / overview / macro thumbnail). Verify
+with:
+
+```bash
+python -c "
+import tifffile
+for i in range(4):
+    with tifffile.TiffFile(f'/path/to/converted/SAMPLE_he_s{i}.ome.tiff') as t:
+        print(f's{i}: {t.series[0].shape} name={t.series[0].name!r}')
+"
+# pick the series whose shape matches your 40x scan (tens of
+# thousands of pixels per dim).
+```
+
+**Step 3 — run hexenium on the OME-TIFF (`scripts/submit_hexenium_from_ometiff.sh`)**:
+
+```bash
+./scripts/submit_hexenium_from_ometiff.sh \
+    --he-ometiff       /path/to/converted/SAMPLE_he_s2.ome.tiff \
+    --sample-id        SAMPLE \
+    --run-id           demo_v1 \
+    --output-root      /data/xenium_runs \
+    --xenium-bundle    /data/SAMPLE/xenium/output-XETG.../ \
+    --dapi-path        /data/SAMPLE/xenium/output-XETG.../morphology_focus/morphology_focus_0000.ome.tif \
+    --proseg-purified-h5ad /data/SAMPLE/spatial_adata/SAMPLE_proseg_purified.h5ad \
+    [--env-name        heRegistration] \
+    [--stages          register warp celltype viz]     # default; omit `he_preprocess`
+```
+
+Under the hood this is a thin dispatcher to
+`submit_he_registration.sh` with `--he-slide <path>` and
+`--stages register warp celltype viz` (skipping `he_preprocess`,
+since the OME-TIFF is already converted). Any other hexenium
+flag you pass — `--mode`, `--warp-run-id`, `--celltype-col`,
+`--set-default-on-success`, `--force-rerun`, … — is forwarded
+untouched.
+
+**Reruns and debugging.** Both scripts are independent:
+
+- Rerun step 2 (conversion) freely — it wipes and rebuilds the
+  zarr; the output OME-TIFFs are idempotent.
+- Rerun step 3 (hexenium) against the same OME-TIFF as often as
+  you like, tweaking `--mode`, `--warp-run-id`, etc. between
+  runs; the conversion doesn't need to be redone.
+
 ## Development & testing
 
 The test suite covers CLI parsing, config validation, layout resolution
