@@ -638,10 +638,14 @@ class TestRangerDirect:
         _make_warped_parquet(
             warp_dir / "he_cell_seg.parquet",
             xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            # Polygons must be area > `area_threshold_px` (default 20 px²)
+            # or `_clean_boundary_gdf` drops them. 10x10 squares (area
+            # 100) match real warp output scale + skeptic F-A's verified
+            # E2E fixture.
             polygons=[
-                Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
-                Polygon([(2, 2), (3, 2), (3, 3), (2, 3)]),
-                Polygon([(4, 4), (5, 4), (5, 5), (4, 5)]),
+                Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),
+                Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]),
+                Polygon([(40, 40), (50, 40), (50, 50), (40, 50)]),
             ],
         )
         out_dir = tmp_path / "celltyped"; out_dir.mkdir()
@@ -709,10 +713,14 @@ class TestRangerDirect:
         _make_warped_parquet(
             warp_dir / "he_cell_seg.parquet",
             xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            # Polygons must be area > `area_threshold_px` (default 20 px²)
+            # or `_clean_boundary_gdf` drops them. 10x10 squares (area
+            # 100) match real warp output scale + skeptic F-A's verified
+            # E2E fixture.
             polygons=[
-                Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
-                Polygon([(2, 2), (3, 2), (3, 3), (2, 3)]),
-                Polygon([(4, 4), (5, 4), (5, 5), (4, 5)]),
+                Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),
+                Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]),
+                Polygon([(40, 40), (50, 40), (50, 50), (40, 50)]),
             ],
         )
         out_dir = tmp_path / "celltyped"; out_dir.mkdir()

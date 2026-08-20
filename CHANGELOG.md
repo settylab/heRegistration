@@ -69,17 +69,26 @@ All notable changes to hexenium will be documented here. Follows
 
 ### Removed
 - CSV-based celltype join (`--celltype-csv`, `--csv-id-col`,
-  `--csv-group-col`). Celltype now sources labels directly from the
-  proseg_purified h5ad via inlined NN. Legacy runs relying on the CSV
-  need to re-source their labels from proseg_purified.
+  `--csv-group-col`). Celltype now reads labels directly off
+  `xenium_ranger.h5ad`'s `.obs["celltype"]` (populated by upstream
+  `rctd-split celltype_writeback`); legacy proseg-NN mode preserved
+  as an opt-in via explicit `--proseg-purified-h5ad`.
 - Opt-in `nn_celltype_mapping` stage and module. Its role (emit a
   CSV that the CSV-based celltype path reads) is subsumed by the
-  inlined NN mapping in `celltyping.py`.
+  inlined NN mapping in `celltyping.py` (still reachable via the
+  legacy opt-in).
+- Pipeline-side proseg auto-derivation from `<xenium_run_dir>/spatial_adata/`
+  (former `_maybe_derive_proseg_purified`). Was silently pinning
+  integrated-mode invocations into the legacy NN path even after the
+  ranger-direct default landed; explicit `--proseg-purified-h5ad`
+  is now the only signal that opts into legacy NN.
 
 ### Migration notes
-- Callers passing `--celltype-csv` need to switch to `--xenium-h5ad`
-  + `--proseg-purified-h5ad` (or rely on integrated mode's
-  auto-derivation from the upstream run dir).
+- Callers passing `--celltype-csv` should just pass `--xenium-h5ad`
+  (or use integrated mode's auto-derivation from `--run-id`) — labels
+  come off the ranger h5ad's `.obs["celltype"]` automatically.
+- Legacy proseg-NN users: nothing changes on the CLI; just keep
+  passing `--proseg-purified-h5ad` explicitly.
 - Stage entry-point signatures changed from `output_root` + `sample_id`
   to `out_dir`; direct callers of `run_registration`/`run_warp`/…
   (outside the pipeline) need to update.
@@ -87,6 +96,10 @@ All notable changes to hexenium will be documented here. Follows
   `converted/`; `registration/` → `register/<he_job_id>/`; `warped/` →
   `warp/<he_job_id>/`; `celltyped/` → `celltyped/<he_job_id>/`;
   `viz/` → `viz/<he_job_id>/`.
+- `unlabeled` sentinel (`#888888` grey) replaces the historic
+  "Unclassified" default when the celltype column is missing or
+  entirely NaN. Old celltyped parquets still contain the historic
+  string — see `viz._build_full_palette` for the alias.
 
 ## [0.1.0] — 2026-07-09
 

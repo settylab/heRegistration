@@ -2,14 +2,16 @@
 
 **Single-sample H&E ↔ Xenium DAPI registration, warp, cell-type propagation, and overlay visualisation.**
 
-> **v0.2.0** — celltype now sources labels directly from an upstream
-> `proseg_purified.h5ad` via an inlined nearest-neighbour mapping (no more
-> `--celltype-csv`). Three invocation modes (standalone /
-> integrated-by-run-id / integrated-by-h5ad); per-stage outputs are sharded
-> under `register/<he_job_id>/`, `warp/<he_job_id>/`,
-> `celltyped/<he_job_id>/`, `viz/<he_job_id>/`. See
-> [CHANGELOG.md](CHANGELOG.md) for the full delta and migration notes from
-> v0.1.x.
+> **v0.2.0** — celltype reads labels DIRECTLY off `xenium_ranger.h5ad`
+> (`.obs["celltype"]`, written by upstream `rctd-split`'s
+> `celltype_writeback`). Legacy proseg-NN mode preserved as an
+> opt-in via explicit `--proseg-purified-h5ad`. Missing / all-NaN
+> column falls to `unlabeled` (grey `#888888`). Three invocation
+> modes (standalone / integrated-by-run-id / integrated-by-h5ad);
+> per-stage outputs sharded under `register/<he_job_id>/`,
+> `warp/<he_job_id>/`, `celltyped/<he_job_id>/`, `viz/<he_job_id>/`.
+> See [CHANGELOG.md](CHANGELOG.md) for the full delta and migration
+> notes from v0.1.x.
 
 At a glance:
 
@@ -19,9 +21,11 @@ At a glance:
   micro-registration transforms into a single registrar.
 - **Warp** Xenium cell + nucleus polygon boundaries from Xenium pixel space
   into H&E pixel space (HEST `warp_and_save_xenium_objects`).
-- **Propagate** cell-type labels from an upstream `proseg_purified.h5ad`
-  onto every Xenium cell via a spatial nearest-neighbour lookup on
-  centroids; nuclei can inherit their sibling cell's label.
+- **Propagate** cell-type labels — default reads them directly from
+  `xenium_ranger.h5ad`'s `.obs["celltype"]` (populated by upstream
+  `rctd-split celltype_writeback`); legacy proseg-NN mode preserved
+  via explicit `--proseg-purified-h5ad`. Missing / all-NaN column
+  falls to `unlabeled`. Nuclei can inherit their sibling cell's label.
 - **Visualise** with a publication-quality overlay: nucleus outlines on a
   downsampled H&E thumbnail, coloured by cell-type label. Add cell polygons
   with `--viz-render-boundaries both`.
@@ -415,17 +419,20 @@ xenium h5ad from the upstream `xenium-preprocess` layout at
 `<output-root>/<sample>/<sample>_<run-id>/spatial_adata/<sample>_xenium_ranger.h5ad`
 and colocates all H&E outputs under
 `<output-root>/<sample>/<sample>_<run-id>/he_registration/`.
-`proseg_purified.h5ad` is auto-derived from
-`<xenium_run_dir>/spatial_adata/<sample>_proseg_purified.h5ad` unless
-`--proseg-purified-h5ad` overrides.
+The celltype stage reads its labels directly from this ranger h5ad's
+`.obs["celltype"]` — no proseg lookup by default. Pass
+`--proseg-purified-h5ad <path>` explicitly to switch to the legacy
+proseg-NN code path.
 
 ### 3. Integrated-by-h5ad
 
 Pass `--xenium-h5ad <path>` directly. Sample identity is read from
 `.uns['sample_id']` and `.uns['run_id']` on that h5ad; outputs colocate
 under `<xenium_run_dir>/he_registration/`. Fails LOUD if `.uns` identity
-is missing or disagrees with a passed `--sample-id`. Same
-proseg auto-derivation as mode 2.
+is missing or disagrees with a passed `--sample-id`. Celltype labels
+still come from this h5ad's `.obs["celltype"]` — same ranger-direct
+default as mode 2; same legacy opt-in via explicit
+`--proseg-purified-h5ad`.
 
 ## Quickstart
 
@@ -727,10 +734,11 @@ Methods-section template (fill in the version tag and Zenodo DOI):
 > al., 2023) via the `valis_hest` adapter and HEST (Jaume et al., 2024)
 > that composes rigid, non-rigid, and micro-registration transforms into
 > a single registrar. Xenium cell and nucleus segmentations were warped
-> into H&E pixel space via HEST's `warp_and_save_xenium_objects`,
-> assigned cell-type labels by nearest-neighbour lookup on centroids
-> against an upstream `proseg_purified.h5ad`, and rendered as per-slide
-> overlays.
+> into H&E pixel space via HEST's `warp_and_save_xenium_objects` and
+> annotated with per-cell type labels sourced from
+> `xenium_ranger.h5ad`'s `.obs["celltype"]` (as written by an upstream
+> `rctd-split` `celltype_writeback` step). Annotated boundaries were
+> then rendered as per-slide overlays.
 
 Please also cite VALIS and HEST directly per their upstream requests.
 
