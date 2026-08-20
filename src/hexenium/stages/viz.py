@@ -143,6 +143,14 @@ def _load_upstream_color_map(
     return out
 
 
+# RGB triple for the "unlabeled" sentinel. Hex #888888 = [136,136,136].
+# Locked in by Tracy on ``settylab/TracyY123-nexus#15`` comment
+# ``5352008910`` — keep in sync with ``celltyping.UNLABELED`` so the
+# viz palette entry matches whatever the celltype stage writes.
+UNLABELED = "unlabeled"
+UNLABELED_RGB = [0x88, 0x88, 0x88]
+
+
 def _build_full_palette(
     labels,
     user_overrides: dict | None = None,
@@ -153,13 +161,16 @@ def _build_full_palette(
 
     Labels get colors in this precedence order:
       1. User-provided override (from YAML `viz.classification_palette`).
-      2. "Unclassified" defaults to gray [180,180,180] if unspecified
-         by (1).
-      3. Upstream cross-pipeline palette (`upstream_palette` — the
+      2. ``"unlabeled"`` defaults to ``#888888`` (medium grey) if
+         unspecified by (1) — Tracy `5352008910`.
+      3. "Unclassified" defaults to gray [180,180,180] if unspecified
+         by (1) — kept as an unbreaking alias for older tests / user
+         YAML that still reference the historic label.
+      4. Upstream cross-pipeline palette (`upstream_palette` — the
          xenium-preprocess color map, keyed by celltype label). Fills
          labels not covered by (1) so the H&E overlay matches the UMAP
          for the same sample/run.
-      4. Any remaining label draws the next unused color from a
+      5. Any remaining label draws the next unused color from a
          qualitative matplotlib colormap (`tab20` by default → 20 hues,
          wraps around for more). Assignment order = first-appearance in
          `labels`, so runs are deterministic.
@@ -167,7 +178,8 @@ def _build_full_palette(
     import matplotlib.pyplot as plt
 
     user_overrides = dict(user_overrides or {})
-    # Sensible default for "Unclassified" — only used if user hasn't set one.
+    user_overrides.setdefault(UNLABELED, list(UNLABELED_RGB))
+    # Legacy default for "Unclassified" — pre-Tracy-5352008910 label.
     user_overrides.setdefault("Unclassified", [180, 180, 180])
     upstream_palette = upstream_palette or {}
 
@@ -193,6 +205,90 @@ def _build_full_palette(
                         int(round(rgba[2] * 255))]
             cmap_i += 1
     return out
+
+
+def _synthesise_unlabeled_from_warp(
+    *, warp_dir: Path, sample_id: str, render_boundaries: str,
+):
+    """Build the wholeslide GeoDataFrame the celltype stage WOULD have
+    written, but with every row labelled :data:`UNLABELED`.
+
+    Called from :func:`run_viz` when the celltype stage did NOT run in
+    this invocation (Tracy `5352008910` Ask 4). Reads whichever warp
+    parquets exist under ``warp_dir`` and reconstructs geometry from
+    WKB the same way ``celltyping._read_warped_gdf`` does — but
+    without importing the celltype stage (which would pull sklearn
+    etc. for a viz-only run).
+
+    ``render_boundaries`` selects which of ``he_cell_seg.parquet`` /
+    ``he_nucleus_seg.parquet`` to load. Errors LOUD if the requested
+    boundary type has no warp parquet on disk — a viz-only invocation
+    that asks for boundaries the warp stage never wrote is a config
+    mistake worth surfacing early.
+    """
+    import geopandas as gpd
+    import pandas as pd
+    from shapely import from_wkb
+
+    from hexenium.stages.celltyping import UNLABELED as _CT_UNLABELED
+
+    # Match constants across modules — if they ever diverge, prefer
+    # the celltyping side since that's where the label is written to
+    # disk in the normal flow.
+    assert _CT_UNLABELED == UNLABELED, (
+        "viz.UNLABELED and celltyping.UNLABELED disagree; sentinel drift "
+        "would produce a broken palette. Keep them in sync."
+    )
+
+    cell_pq = warp_dir / "he_cell_seg.parquet"
+    nuc_pq = warp_dir / "he_nucleus_seg.parquet"
+
+    want_cells = render_boundaries in ("cell", "both")
+    want_nuclei = render_boundaries in ("nucleus", "both")
+
+    frames: list[gpd.GeoDataFrame] = []
+    if want_cells:
+        if not cell_pq.exists():
+            raise FileNotFoundError(
+                f"viz --render-boundaries={render_boundaries!r} requires "
+                f"a cell warp parquet; {cell_pq} is missing. Include "
+                f"`warp` in --stages or re-run warp with cells in --warp-targets."
+            )
+        df = pd.read_parquet(cell_pq).reset_index().rename(
+            columns={"__null_dask_index__": "cell_id"},
+        )
+        df["boundary_type"] = "cell"
+        df["classification"] = UNLABELED
+        df["cell_id"] = df["cell_id"].astype(str)
+        frames.append(gpd.GeoDataFrame(
+            df[["cell_id", "classification", "boundary_type"]],
+            geometry=from_wkb(df["geometry"].values), crs=None,
+        ))
+    if want_nuclei:
+        if not nuc_pq.exists():
+            raise FileNotFoundError(
+                f"viz --render-boundaries={render_boundaries!r} requires "
+                f"a nucleus warp parquet; {nuc_pq} is missing. Include "
+                f"`warp` in --stages or re-run warp with nuclei in --warp-targets."
+            )
+        df = pd.read_parquet(nuc_pq).reset_index().rename(
+            columns={"__null_dask_index__": "cell_id"},
+        )
+        df["boundary_type"] = "nucleus"
+        df["classification"] = UNLABELED
+        df["cell_id"] = df["cell_id"].astype(str)
+        frames.append(gpd.GeoDataFrame(
+            df[["cell_id", "classification", "boundary_type"]],
+            geometry=from_wkb(df["geometry"].values), crs=None,
+        ))
+    combined = gpd.GeoDataFrame(
+        pd.concat(frames, ignore_index=True),
+        geometry="geometry", crs=None,
+    )
+    log(f"[viz] synthesised {len(combined)} boundaries from warp "
+        f"(render_boundaries={render_boundaries!r}, all labelled "
+        f"{UNLABELED!r})")
+    return combined
 
 
 def run_viz(
@@ -237,11 +333,23 @@ def run_viz(
         return sentinel
 
     parquet_path = celltyped_dir / f"{sample_id}_celltyped_wholeslide.parquet"
-    if not parquet_path.exists():
-        raise FileNotFoundError(
-            f"Celltyped parquet not found at {parquet_path}; run celltype stage first."
+    if parquet_path.exists():
+        gdf = gpd.read_parquet(parquet_path)
+    else:
+        # Fallback path per Tracy `5352008910` Ask 4: viz can run
+        # without a preceding celltype stage as long as the warp
+        # parquets are on disk. Synthesise a wholeslide GeoDataFrame
+        # from the warp outputs; every polygon gets
+        # ``classification = UNLABELED`` so the palette maps to grey.
+        # ``render_boundaries`` is respected (Tracy's 4a: default
+        # ``nucleus`` unless the operator explicitly overrode).
+        log(f"[viz] celltyped parquet absent at {parquet_path} — "
+            f"falling back to warp parquets directly (all polygons "
+            f"labelled {UNLABELED!r}).")
+        gdf = _synthesise_unlabeled_from_warp(
+            warp_dir=warp_dir, sample_id=sample_id,
+            render_boundaries=render_boundaries,
         )
-    gdf = gpd.read_parquet(parquet_path)
 
     # Read every actual classification label from the data first (in
     # first-appearance order), then build a palette that covers all of
