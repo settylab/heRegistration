@@ -90,12 +90,12 @@ canonical layout that xenium-preprocess-pipeline peers with):
                               warp/<he_job_id>/he_cell_seg.parquet
                               warp/<he_job_id>/he_nucleus_seg.parquet
                                         │
-    xenium-preprocess                   │
+    xenium-ranger                       │
     ┌────────────────┐        ┌───────────────────┐
-    │ proseg_puri-   │───────▶│ celltype          │
-    │  fied.h5ad +   │        │ NN celltype       │
-    │ xenium_ran-    │        │ mapping           │
-    │  ger.h5ad      │        │ (proseg → xenium) │
+    │ xenium_ranger  │───────▶│ celltype          │
+    │  .h5ad         │        │ read .obs[<col>]  │
+    │ .obs[<col>] =  │        │ direct on xenium  │
+    │  celltype label│        │ cells             │
     └────────────────┘        └───────────────────┘
                                         │
                                         ▼
@@ -131,6 +131,28 @@ so the two stay independent — see [HPC usage
 symlinks at the fresh `<he_job_id>` at the tail of the run.
 See [Multi-registration workflows](#invocation-modes) for how to
 compare parallel registrations before promoting the winner.
+
+**Celltype input requirement.** The default celltype driver is
+"ranger-direct" (commit `770e3fe`): `celltype` reads a celltype
+label column directly from `xenium_ranger.h5ad`'s `.obs`. So the
+`.h5ad` you pass as `--xenium-h5ad` (or the one hexenium
+derives from `--run-id` under `<xenium_run_dir>/spatial_adata/`)
+MUST already carry that column. Column-name resolution order
+(`src/hexenium/stages/celltyping.py:_CELLTYPE_COL_CANDIDATES`,
+first-match-wins):
+`celltype > first_type > primary_cell_type > celltype_updated`.
+
+Override with `--celltype-col <name>` when the column is named
+differently — the resolver still requires the column to exist on
+`.obs`; it just skips the auto-scan.
+
+**Legacy proseg-→-xenium NN mapping.** If you have a
+`proseg_purified.h5ad` and want to spatially NN-map its
+celltype labels onto the xenium cells (the pre-`770e3fe`
+default), pass `--proseg-purified-h5ad <path>` in addition to
+the xenium h5ad. See [`celltype` — assign cell-type labels to
+warped polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
+for details.
 
 Per-stage descriptions below.
 
