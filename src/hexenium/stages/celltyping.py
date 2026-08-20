@@ -88,30 +88,94 @@ _SPATIAL_COORD_OBS_PAIRS = (
 )
 
 
-def _resolve_celltype_col(adata_obs_cols, spec: str | None) -> str:
-    """Pick the celltype column on the source (proseg_purified) side.
+#: The sentinel value hexenium uses in-memory (and downstream in
+#: viz palettes) when a source h5ad has no usable celltype column.
+#: Value + grey hex fixed by Tracy on ``settylab/TracyY123-nexus#15``
+#: comment ``5352008910`` — do not rename without a matching palette
+#: entry in ``viz._build_full_palette`` + doc update.
+UNLABELED = "unlabeled"
+
+
+def _resolve_celltype_col(adata_obs_cols, spec: str | None) -> str | None:
+    """Pick the celltype column on the source h5ad.
 
     ``spec`` = ``None`` / ``"auto"`` triggers precedence-based
     auto-detect from ``_CELLTYPE_COL_CANDIDATES``. Anything else is
     treated as a literal column name and returned verbatim after an
     existence check.
+
+    Returns the chosen column name OR ``None`` when nothing matched.
+    Callers that need "give me labels" behavior should treat ``None``
+    as "fall back to :data:`UNLABELED` for every row". Prior behavior
+    was to raise ``KeyError`` here; the fallback semantic was requested
+    by Tracy (`5351815301`) to avoid crashing celltype on samples that
+    lack the writeback column.
     """
     cols = list(adata_obs_cols)
     if spec and spec != "auto":
         if spec not in cols:
-            raise KeyError(
-                f"proseg-purified.h5ad is missing celltype column {spec!r}. "
-                f"Available .obs columns: {cols}"
-            )
+            log(f"[celltype] WARN: source h5ad is missing requested "
+                f"celltype column {spec!r}. Available .obs columns "
+                f"(first 20): {cols[:20]}. Falling back to "
+                f"{UNLABELED!r} for every row.")
+            return None
         return spec
     for c in _CELLTYPE_COL_CANDIDATES:
         if c in cols:
-            log(f"[celltype] auto-detected proseg celltype column: {c!r}")
+            log(f"[celltype] auto-detected celltype column: {c!r}")
             return c
-    raise KeyError(
-        f"could not auto-detect proseg celltype column from {cols}. "
-        f"Tried (in order): {_CELLTYPE_COL_CANDIDATES}. Pass --celltype-col explicitly."
+    log(f"[celltype] WARN: no celltype column found on source h5ad. "
+        f"Tried (in order): {_CELLTYPE_COL_CANDIDATES}. "
+        f"Available .obs columns (first 20): {cols[:20]}. "
+        f"Falling back to {UNLABELED!r} for every row.")
+    return None
+
+
+def _read_labels_or_unlabeled(
+    obs: pd.DataFrame, celltype_col: str | None, n_expected: int,
+) -> np.ndarray:
+    """Return an ``n_expected``-length object array of celltype labels.
+
+    Three cases produce the ``UNLABELED`` sentinel across all rows:
+
+    1. ``celltype_col is None`` — auto-detect / explicit-lookup failed;
+       the resolver already logged WARN.
+    2. Column exists but every value is null / empty (``pd.isna`` or
+       stripped-empty string). Tracy's 2c: "an entirely-NaN/empty
+       existing column also falls back to ``unlabeled``".
+    3. Column exists but a specific row is null — that row falls to
+       ``UNLABELED`` while non-null rows keep their labels.
+    """
+    if celltype_col is None:
+        return np.full(n_expected, UNLABELED, dtype=object)
+    raw = obs[celltype_col].astype(object).to_numpy()
+    if len(raw) != n_expected:
+        # Defensive — misalignment would corrupt the downstream join.
+        raise ValueError(
+            f"celltype column {celltype_col!r} has {len(raw)} values but "
+            f"expected {n_expected} rows on the h5ad. Refusing to guess."
+        )
+    # Per-row NaN → sentinel. Stripped-empty strings also count as
+    # missing so downstream palettes / GeoJSON consumers don't render
+    # a blank legend entry.
+    mask_missing = np.array(
+        [(v is None) or (isinstance(v, float) and np.isnan(v))
+         or (isinstance(v, str) and not v.strip())
+         for v in raw],
+        dtype=bool,
     )
+    if mask_missing.all():
+        log(f"[celltype] WARN: source h5ad column {celltype_col!r} is "
+            f"entirely NaN / empty across {len(raw)} rows. Falling "
+            f"back to {UNLABELED!r} for every row.")
+        return np.full(n_expected, UNLABELED, dtype=object)
+    if mask_missing.any():
+        log(f"[celltype] {mask_missing.sum()}/{len(raw)} rows on column "
+            f"{celltype_col!r} were NaN/empty; falling back to "
+            f"{UNLABELED!r} for those rows.")
+        raw = raw.copy()
+        raw[mask_missing] = UNLABELED
+    return raw
 
 
 def _resolve_xenium_id_col(obs: pd.DataFrame, spec: str | None) -> str:
@@ -262,7 +326,7 @@ def _celltype_from_nn(
     xy_p = _resolve_spatial_coords(
         ap, proseg_x_col, proseg_y_col, side_name="proseg_purified.h5ad"
     )
-    labels_p = obs_p[ct_col].astype(object).to_numpy()
+    labels_p = _read_labels_or_unlabeled(obs_p, ct_col, len(xy_p))
     ok_p = np.isfinite(xy_p).all(axis=1)
     if not ok_p.all():
         log(f"[celltype] proseg: dropped {(~ok_p).sum()} rows with NaN centroid "
@@ -346,6 +410,50 @@ def _celltype_from_nn(
         "nn_distance": winning_dist.astype(float),
     })
     return annot
+
+
+def _celltype_from_xenium_ranger_direct(
+    *,
+    xenium_h5ad: Path,
+    celltype_col: str | None,
+    id_col: str | None,
+) -> pd.DataFrame:
+    """Read celltype labels DIRECTLY from ``xenium_ranger.h5ad``'s ``.obs``.
+
+    Post-xenium-preprocess rctd-split's ``celltype_writeback`` stage,
+    ``xenium_ranger.h5ad`` carries per-cell celltype labels at
+    ``.obs["celltype"]`` (default column from
+    ``packages/rctd-split/config/default.yaml:172``). Reading them
+    directly saves a whole NN fit + guarantees hexenium sees the
+    same labels the upstream summary reports use — no drift risk.
+
+    Returns a DataFrame with columns ``(xenium_cell_id, group,
+    nn_distance)``. ``nn_distance`` is populated as ``NaN`` because
+    this path involves no NN mapping — the label came straight off
+    the query h5ad. Missing / all-NaN column falls to ``UNLABELED``
+    per Tracy's spec (`5352008910`).
+    """
+    import anndata as ad
+
+    log(f"[celltype] reading xenium_ranger (ranger-direct): {xenium_h5ad}")
+    ax = ad.read_h5ad(xenium_h5ad)
+    obs_x = ax.obs
+    xid_col = _resolve_xenium_id_col(obs_x, id_col)
+    ids_x = _get_xenium_ids(obs_x, xid_col)
+    ct_col = _resolve_celltype_col(obs_x.columns, celltype_col)
+    labels_x = _read_labels_or_unlabeled(obs_x, ct_col, len(ids_x))
+
+    log(f"[celltype] ranger-direct: {len(ids_x)} cells labelled from "
+        f".obs[{ct_col!r}] "
+        f"→ {pd.Series(labels_x).nunique()} unique labels")
+
+    return pd.DataFrame({
+        "xenium_cell_id": pd.Series(ids_x).astype(str).str.strip(),
+        "group": pd.Series(labels_x).astype(object),
+        # No NN in this path; keep the column shape stable for
+        # downstream callers that expect it.
+        "nn_distance": np.full(len(ids_x), np.nan, dtype=float),
+    })
 
 
 def _read_warped_gdf(parquet_path: Path) -> gpd.GeoDataFrame:
@@ -482,16 +590,26 @@ def _clean_boundary_gdf(
     # 1. Standardise id.
     subset["cell_id"] = subset[id_col].astype(str)
 
-    # 2. Standardise classification.
+    # 2. Standardise classification. Historic behavior mapped NaN →
+    # "Unclassified"; Tracy `5352008910` unified this to the single
+    # ``UNLABELED`` sentinel so the viz palette only needs one grey
+    # entry regardless of how the row ended up unlabeled (missing
+    # column, all-NaN column, orphan cell id from a warp/h5ad
+    # mismatch, or the no-h5ad path that synthesises UNLABELED here).
     if class_col is not None and class_col in subset.columns:
         subset["classification"] = subset[class_col]
     else:
         subset["classification"] = np.nan
     subset["classification"] = subset["classification"].astype("object")
     subset["classification"] = subset["classification"].where(
-        ~pd.isna(subset["classification"]), "Unclassified"
+        ~pd.isna(subset["classification"]), UNLABELED
     )
-    subset["classification"] = subset["classification"].astype(str)
+    # Empty strings can slip through when a real h5ad has "" values
+    # (Xenium ranger's celltype col sometimes carries empty strings
+    # for cells that fell out of the reference-mapped RCTD grid).
+    subset["classification"] = subset["classification"].astype(str).where(
+        subset["classification"].astype(str).str.strip().astype(bool), UNLABELED
+    )
 
     # 3. Optional ROI filter.
     if roi is not None:
@@ -653,8 +771,20 @@ def run_celltyping(
             f"Neither {cell_parquet} nor {nuc_parquet} exists; nothing to celltype."
         )
 
-    # Load + prep the annotation table via proseg_purified → xenium NN
-    # mapping.
+    # Source-mode routing (Tracy `5352008910`):
+    #
+    # * If ``--proseg-purified-h5ad`` was passed explicitly (present
+    #   in ``proseg_purified_h5ad``) AND ``--xenium-h5ad`` is available,
+    #   use the LEGACY proseg → xenium NN-mapping path. Kept for
+    #   backwards compat with users who don't run xenium-preprocess's
+    #   rctd-split celltype_writeback (or who want to override the
+    #   ranger labels with a fresh NN fit).
+    # * If only ``--xenium-h5ad`` is set (the typical post-rctd-split
+    #   flow), read celltype labels DIRECTLY from ``.obs[<celltype_col>]``.
+    #   No NN, no proseg. This is the new default.
+    # * If NEITHER h5ad is set, we can't label anything — every row
+    #   goes out as ``UNLABELED``. Preserves the previous "cells go
+    #   out unclassified" ergonomics without crashing.
     if xenium_h5ad is not None and proseg_purified_h5ad is not None:
         annot = _celltype_from_nn(
             proseg_purified_h5ad=Path(proseg_purified_h5ad),
@@ -676,10 +806,20 @@ def run_celltyping(
         log(f"[celltype] wrote annotation parquet ({len(annot)} rows) -> {annot_path.name}")
         # Downstream _cumcount_merge only needs (xenium_cell_id, group).
         annot = annot[["xenium_cell_id", "group"]]
+    elif xenium_h5ad is not None:
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=Path(xenium_h5ad),
+            celltype_col=celltype_col,
+            id_col=id_col,
+        )
+        annot_path = out_dir / f"{sample_id}_celltype_annotation.parquet"
+        annot.to_parquet(annot_path, index=False)
+        log(f"[celltype] wrote annotation parquet ({len(annot)} rows) -> {annot_path.name}")
+        annot = annot[["xenium_cell_id", "group"]]
     else:
         annot = None
-        log("[celltype] no --xenium-h5ad + --proseg-purified-h5ad; "
-            "classification will be 'Unclassified' everywhere")
+        log(f"[celltype] no --xenium-h5ad; classification will be "
+            f"{UNLABELED!r} everywhere")
 
     # ------------------------------------------------------------------
     # Load + annotate + dedupe (once per boundary type, before precision
@@ -693,7 +833,12 @@ def run_celltyping(
         log(f"[celltype] cells: {len(cells_annotated)} polygons, "
             f"{cells_annotated['xenium_cell_id'].nunique()} unique ids "
             f"({cells_annotated['xenium_cell_id'].duplicated().sum()} duplicate rows)")
-        if annot is not None:
+        if annot is None:
+            # No h5ad at all — synthesise "unlabeled" for every row so
+            # the downstream viz stage still gets a `classification`
+            # column (Tracy's Ask 2 semantics on no-source-h5ad).
+            cells_annotated = cells_annotated.assign(group=UNLABELED)
+        else:
             cells_annotated = _cumcount_merge(cells_annotated, annot)
         cells_annotated = cells_annotated.drop_duplicates(
             subset="xenium_cell_id", keep="first")
@@ -703,12 +848,19 @@ def run_celltyping(
         log(f"[celltype] nuclei: {len(nuclei_annotated)} polygons, "
             f"{nuclei_annotated['xenium_cell_id'].nunique()} unique ids "
             f"({nuclei_annotated['xenium_cell_id'].duplicated().sum()} duplicate rows)")
-        if annot is not None:
+        if annot is None:
+            nuclei_annotated = nuclei_annotated.assign(group=UNLABELED)
+        else:
             nuclei_annotated = _cumcount_merge(nuclei_annotated, annot)
         nuclei_annotated = nuclei_annotated.drop_duplicates(
             subset="xenium_cell_id", keep="first")
 
-    class_col = "group" if annot is not None else None
+    # `group` is now guaranteed to be present on both annotated frames
+    # (either from the resolver / synthetic UNLABELED here, OR from a
+    # real h5ad via _celltype_from_*). Downstream renderers can rely
+    # on `class_col="group"` unconditionally — no more "unclassified
+    # missing-column" branches to reason about.
+    class_col = "group"
 
     # ------------------------------------------------------------------
     # Emit the four files. Each pass through _clean_boundary_gdf is

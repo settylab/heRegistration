@@ -169,9 +169,12 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                    help="Use Dask LocalCluster + JVMPlugin for warp.")
     # Celltype — inlined proseg → xenium NN mapping.
     p.add_argument("--celltype-col", default=None,
-                   help="Column on proseg_purified.h5ad's .obs to use as celltype "
-                        "label. Default 'auto' — precedence celltype > first_type > "
-                        "primary_cell_type > celltype_updated.")
+                   help="Column on the source h5ad's .obs to use as celltype "
+                        "label. Default 'celltype' (matches xenium-preprocess's "
+                        "rctd-split celltype_writeback). Set to 'auto' for "
+                        "precedence celltype > first_type > primary_cell_type "
+                        "> celltype_updated. Missing / all-NaN → 'unlabeled' "
+                        "fallback (rendered as grey #888888 by viz).")
     p.add_argument("--id-col", default=None,
                    help="Column on xenium.h5ad's .obs holding xenium UUIDs. "
                         "Default 'auto' — shape-check first, prefers UUID-shaped "

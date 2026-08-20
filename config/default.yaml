@@ -137,10 +137,14 @@ celltype:
   # Path override for the source proseg_purified h5ad. Falls back to
   # the top-level `proseg_purified_h5ad:` key if null.
   proseg_purified_h5ad: null
-  # Auto-detect precedence for the celltype .obs column on
-  # proseg_purified.h5ad: celltype > first_type > primary_cell_type >
-  # celltype_updated. Pass a literal column name to force a choice.
-  celltype_col: auto
+  # Column on the source h5ad that carries per-cell celltype labels.
+  # Default `celltype` matches xenium-preprocess's rctd-split
+  # `celltype_writeback` default (writes .obs["celltype"] onto
+  # xenium_ranger.h5ad). Set to `auto` for the historic precedence
+  # walk (celltype > first_type > primary_cell_type >
+  # celltype_updated). Missing / all-NaN → `unlabeled` fallback
+  # (rendered as grey #888888 by viz).
+  celltype_col: celltype
   # Auto-detect precedence for the xenium-side id column. Every
   # candidate is UUID-shape-checked (regex ^[a-z]{8}-\d+$) before use,
   # so this can't silently pick Proseg's int64 index masquerading as
