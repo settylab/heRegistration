@@ -1034,6 +1034,29 @@ Tests are ordinary `pytest` — no cluster or GPU required. `pytest -k
 layout` and friends work for targeted runs. `conftest.py` in `tests/`
 sets up shared fixtures.
 
+## Documentation
+
+Full docs live at
+**[settylab.github.io/heRegistration](https://settylab.github.io/heRegistration/)**.
+
+The docs site covers per-stage algorithm details, the full
+config knob reference, HPC usage, troubleshooting, and
+advanced workflows. This README is the quickstart; reach
+for the docs when you need depth on a specific stage or
+knob.
+
+Docs are built with [MkDocs Material](https://squidfunk.github.io/mkdocs-material/)
+and auto-deploy on every push to `v0.2.0` / `main` via
+`.github/workflows/docs.yml`. Source lives under
+[`docs/`](docs/); preview locally with
+`pip install mkdocs-material && mkdocs serve`.
+
+> **URL activates when GitHub Pages is enabled.** On first
+> setup, an org admin needs to enable Pages once (Settings →
+> Pages → Source: `gh-pages` branch). The
+> `mkdocs gh-deploy` workflow auto-creates that branch on
+> the first successful build.
+
 ## Citation
 
 If you use hexenium in a publication, cite via the metadata in

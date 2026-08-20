@@ -28,3 +28,6 @@ scratch/
 # Slurm logs
 slurm-*.out
 logs/
+
+# MkDocs build output
+site/

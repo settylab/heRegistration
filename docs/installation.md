@@ -9,7 +9,7 @@ their transitive stack. Both steps are captured in
 `environments/heRegistration-requirements.txt`.
 
 `--no-deps` on the pip step is **load-bearing** and must live on the
-CLI — see [Why `--no-deps`](#why---no-deps-is-mandatory) below. This
+CLI — see [Why `--no-deps`](#why-no-deps-is-mandatory) below. This
 mirrors the recommended flow in the top-level README; keep both in
 sync.
 
@@ -377,8 +377,9 @@ export BFTOOLS_ROOT=$TOOL
 export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
 ```
 
-Full details: README ["HPC usage (Slurm) — VSI inputs:
-automatic BioFormats conversion (unified)"](../README.md#vsi-inputs-automatic-bioformats-conversion-unified).
+Full details on the HPC-side unified BioFormats VSI flow
+live in the [HPC / Slurm guide](hpc.md) (migrating from the
+README in PR 4).
 
 Skip this section entirely if your H&E is already
 `.ome.tif` / `.ome.tiff` / `.tif`.
