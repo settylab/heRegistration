@@ -1,25 +1,25 @@
 # hexenium
 
-**H&E ↔ Xenium registration pipeline.** Align a hematoxylin-and-eosin
-whole-slide image to a matched Xenium in-situ transcriptomics run,
-warp Xenium cell + nucleus segmentations into H&E pixel space, and
-render a per-slide celltype-annotated overlay — one CLI invocation
-per sample.
+**H&E ↔ Xenium registration pipeline.** One CLI invocation per
+sample. Aligns a hematoxylin-and-eosin whole-slide image to a
+matched Xenium in-situ transcriptomics run. Warps Xenium cell +
+nucleus segmentations into H&E pixel space. Renders a per-slide
+celltype-annotated overlay.
 
 - **CLI**: `hexenium run …` (Python package + console script).
 - **Env**: pinned conda + pip layer at
   `environments/heRegistration.yml`. Default env name
   `heRegistration`.
-- **HPC**: `scripts/submit_he_registration.sh …` self-submits to
-  Slurm, handles VSI inputs via an `afterok:` conversion chain, and
-  routes logs into the run tree.
+- **HPC**: `scripts/submit_he_registration.sh …` self-submits
+  to Slurm. Handles VSI inputs via an `afterok:` conversion
+  chain. Routes logs into the run tree.
 
 Under the hood: [VALIS](https://github.com/MathOnco/valis)
-(via `valis_hest`) for the registration solve, HEST for the
-boundary warp; five stages
-(`he_preprocess → register → warp → celltype → viz`), each guarded
-by a sentinel file so reruns pick up where the last invocation
-left off.
+(via `valis_hest`) solves the registration; HEST does the
+boundary warp. Five stages
+(`he_preprocess → register → warp → celltype → viz`). Each
+stage is guarded by a sentinel file, so reruns pick up where
+the last invocation left off.
 
 **Contents**: [Pipeline overview](#pipeline-overview) ·
 [Installation](#installation) · [Quickstart](#quickstart) ·
@@ -30,23 +30,14 @@ left off.
 [Development & testing](#development--testing) ·
 [Citation](#citation)
 
-> **v0.2.0 highlights** — Celltype now reads labels DIRECTLY off
-> `xenium_ranger.h5ad`'s `.obs[<col>]` (ranger-direct, default);
-> legacy proseg-→-xenium NN mapping preserved as an opt-in via
-> `--proseg-purified-h5ad`. Missing / all-NaN column falls to
-> `unlabeled` (grey `#888888`). Per-stage outputs sharded under
-> `register/<he_job_id>/` / `warp/<he_job_id>/` / etc. Automatic
-> BioFormats-backed VSI conversion when `--he-slide` is a `.vsi`
-> file (Path B, unified into `submit_he_registration.sh`). See
-> [CHANGELOG.md](CHANGELOG.md) for the full delta.
-
 ## Pipeline overview
 
-Five stages plus an optional VSI conversion job (Path B), chained by
-`--dependency=afterok:` on Slurm when the input is a `.vsi` file.
-Per-stage outputs colocate under
-`<output-root>/<sample>/<sample>_<run-id>/he_registration/` (the
-canonical layout that xenium-preprocess-pipeline peers with):
+Five stages. When `--he-slide` is a `.vsi` file, the HPC driver
+runs a VSI → OME-TIFF conversion job first and chains hexenium
+after it with `--dependency=afterok:`. Per-stage outputs
+colocate under
+`<output-root>/<sample>/<sample>_<run-id>/he_registration/` —
+the canonical layout that xenium-preprocess-pipeline peers with:
 
 ```
     H&E slide                    hexenium pipeline                   per-run outputs
@@ -112,39 +103,42 @@ canonical layout that xenium-preprocess-pipeline peers with):
                               output/{register,warp,celltyped,viz}   [symlinks]
 ```
 
-`he_preprocess` is skipped automatically when `--he-slide` is already
-`.ome.tif` / `.ome.tiff` / `.tif`. When it IS a `.vsi`,
-`submit_he_registration.sh` submits a `bioformats2raw` +
-`raw2ometiff` conversion job as a separate Slurm record, then
-submits the hexenium job with `--dependency=afterok:<conv_jobid>`
-so the two stay independent — see [HPC usage
-(Slurm)](#hpc-usage-slurm).
+`he_preprocess` is skipped automatically when `--he-slide` is
+already `.ome.tif` / `.ome.tiff` / `.tif`. When the input is a
+`.vsi`, `submit_he_registration.sh` submits two Slurm records.
+The first runs `bioformats2raw` + `raw2ometiff` conversion.
+The second submits hexenium with
+`--dependency=afterok:<conv_jobid>` so the two jobs stay
+independent. See [HPC usage (Slurm)](#hpc-usage-slurm).
 
 `--set-default-on-success` re-points `output/{register,warp,celltyped,viz}`
-symlinks at the fresh `<he_job_id>` at the tail of the run.
-See [Multi-registration workflows](#invocation-modes) for how to
-compare parallel registrations before promoting the winner.
+symlinks at the fresh `<he_job_id>` at the tail of the run. To
+compare parallel registrations before promoting a winner, run
+hexenium N times without `--set-default-on-success`, then
+promote the winner with `--register-run-id <he_job_id>
+--set-default-on-success`.
 
 **Celltype input requirement.** The default celltype driver is
-"ranger-direct" (commit `770e3fe`): `celltype` reads a celltype
-label column directly from `xenium_ranger.h5ad`'s `.obs`. So the
-`.h5ad` you pass as `--xenium-h5ad` (or the one hexenium
-derives from `--run-id` under `<xenium_run_dir>/spatial_adata/`)
-MUST already carry that column. Column-name resolution order
-(`src/hexenium/stages/celltyping.py:_CELLTYPE_COL_CANDIDATES`,
-first-match-wins):
+"ranger-direct" (commit `770e3fe`). `celltype` reads a celltype
+label column directly from `xenium_ranger.h5ad`'s `.obs`. So
+the `.h5ad` you pass as `--xenium-h5ad` MUST already carry
+that column. The same applies to the h5ad hexenium derives
+from `--run-id` under `<xenium_run_dir>/spatial_adata/`.
+
+Column-name resolution walks a first-match-wins list
+(`src/hexenium/stages/celltyping.py:_CELLTYPE_COL_CANDIDATES`):
 `celltype > first_type > primary_cell_type > celltype_updated`.
 
 Override with `--celltype-col <name>` when the column is named
-differently — the resolver still requires the column to exist on
-`.obs`; it just skips the auto-scan.
+differently. The resolver still requires the column to exist
+on `.obs`; it just skips the auto-scan.
 
-**Legacy proseg-→-xenium NN mapping.** If you have a
-`proseg_purified.h5ad` and want to spatially NN-map its
+**Legacy proseg-→-xenium NN mapping.** Opt in by passing
+`--proseg-purified-h5ad <path>` in addition to the xenium
+h5ad. In this mode, hexenium spatially NN-maps proseg
 celltype labels onto the xenium cells (the pre-`770e3fe`
-default), pass `--proseg-purified-h5ad <path>` in addition to
-the xenium h5ad. See [`celltype` — assign cell-type labels to
-warped polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
+default). See [`celltype` — assign cell-type labels to warped
+polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
 for details.
 
 Per-stage descriptions are in [Stage details](#stage-details)
@@ -154,40 +148,56 @@ below the pipeline overview → installation → quickstart flow.
 
 ### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
 
-If `--he-path` points to an Olympus SlideScanner `.vsi`, this stage
-converts it to a pyramidal OME-TIFF that matches 10x's Xenium Explorer
-image-conversion specification: 1024×1024 tiles, lossless JPEG 2000 (or
-ZLIB), 7-level pyramid at scale 2. `OpenSlide` reads the source;
-`tifffile.TiffWriter` writes the pyramid; physical pixel size is
-propagated from OpenSlide's `mpp-{x,y}` into the OME-TIFF's
-`PhysicalSize{X,Y}` metadata. If the input is already an OME-TIFF, the
-stage returns immediately and downstream stages consume the input as-is.
+If `--he-slide` points to an Olympus SlideScanner `.vsi`,
+this stage converts it to a pyramidal OME-TIFF that matches
+10x's Xenium Explorer image-conversion specification:
+1024×1024 tiles, lossless JPEG 2000 (or ZLIB), 7-level
+pyramid at scale 2.
 
-The converted OME-TIFF is written **next to the source VSI** as
-`<vsi_dir>/<vsi_stem>.ome.tif` when that directory is writable, so a
-single conversion is reused across every pipeline invocation for that
-sample. When the source dir is read-only, the pipeline falls back to
-`<output_root_he>/converted/<sample_id>_he.ome.tif`. Re-runs auto-detect
-either location and skip re-conversion; `--force-preprocess` forces
-re-conversion of the VSI without touching downstream stages.
+`OpenSlide` reads the source. `tifffile.TiffWriter` writes
+the pyramid. Physical pixel size is propagated from
+OpenSlide's `mpp-{x,y}` into the OME-TIFF's
+`PhysicalSize{X,Y}` metadata. If the input is already an
+OME-TIFF, the stage returns immediately and downstream
+stages consume the input as-is.
+
+The converted OME-TIFF is written **next to the source VSI**
+as `<vsi_dir>/<vsi_stem>.ome.tif` when that directory is
+writable. This lets a single conversion be reused across
+every pipeline invocation for that sample. When the source
+dir is read-only, the pipeline falls back to
+`<output_root_he>/converted/<sample_id>_he.ome.tif`. Re-runs
+auto-detect either location and skip re-conversion.
+`--force-preprocess` forces re-conversion of the VSI without
+touching downstream stages.
 
 ### `register` — H&E ↔ Xenium DAPI alignment (VALIS)
 
 Registers the H&E to the DAPI morphology image using VALIS via
-`valis_hest`. The default `--mode full_with_micro` composes three
-transforms into one registrar: a rigid initial solve, a non-rigid
-B-spline solve at `max_processed_image_dim_px = 1500`, and a
-micro-registration refinement at `max_non_rigid_registration_dim_px =
-10000` — matching stock HEST `register_dapi_he(micro_reg=True)`. Two
-diagnostic modes are available for sweeps: `rigid_only` (fastest, rigid
-only) and `rigid_nonrigid` (rigid + non-rigid, no micro). Macenko-style
-H&E deconvolution runs before feature detection by default; on
-faint-hematoxylin samples it can degrade alignment, so override with
-`--use-he-deconvolution false` when a run shows that failure mode.
-Reflection checking is on by default so mirrored slides are caught
-cheaply. To sidestep a hardcoded `he_key='aligned_fullres_HE'` in
-`valis_hest`, hexenium symlinks the user's H&E to that canonical name
-inside the per-sample workdir before invoking VALIS.
+`valis_hest`. The default `--mode full_with_micro` composes
+three transforms into one registrar:
+
+1. A rigid initial solve.
+2. A non-rigid B-spline solve at
+   `max_processed_image_dim_px = 1500`.
+3. A micro-registration refinement at
+   `max_non_rigid_registration_dim_px = 10000`.
+
+This matches stock HEST `register_dapi_he(micro_reg=True)`.
+Two diagnostic modes are available for sweeps: `rigid_only`
+(fastest, rigid only) and `rigid_nonrigid` (rigid + non-rigid,
+no micro).
+
+Macenko-style H&E deconvolution runs before feature detection
+by default. On faint-hematoxylin samples it can degrade
+alignment. Override with `--use-he-deconvolution false` when a
+run shows that failure mode.
+
+Reflection checking is on by default so mirrored slides are
+caught cheaply. To sidestep a hardcoded
+`he_key='aligned_fullres_HE'` in `valis_hest`, hexenium
+symlinks the user's H&E to that canonical name inside the
+per-sample workdir before invoking VALIS.
 
 **Writes:**
 `register/<he_job_id>/data/_registrar.pickle` — the composed rigid ×
@@ -198,14 +208,18 @@ sibling `rigid_registration/`, `non_rigid_registration/`,
 
 ### `warp` — apply the registrar to Xenium objects
 
-Applies the VALIS registrar to the Xenium `cell_boundaries.parquet` and
-`nucleus_boundaries.parquet` (and, optionally, `transcripts.parquet`) via
-HEST's `warp_and_save_xenium_objects`. Warping runs on a Dask
-`LocalCluster` in which every worker initialises the BioFormats JVM
-exactly once via a `WorkerPlugin`; JPype enforces a single JVM lifecycle
-per Python process, so the JVM is deliberately not torn down after
-registration. Outputs are WKB-encoded GeoPandas parquets in H&E pixel
-space; each row's Xenium `cell_id` is preserved for downstream joins.
+Applies the VALIS registrar to the Xenium
+`cell_boundaries.parquet` and `nucleus_boundaries.parquet` (and,
+optionally, `transcripts.parquet`) via HEST's
+`warp_and_save_xenium_objects`.
+
+Warping runs on a Dask `LocalCluster`. Every worker initialises
+the BioFormats JVM exactly once via a `WorkerPlugin`. JPype
+enforces a single JVM lifecycle per Python process, so the JVM
+is deliberately not torn down after registration.
+
+Outputs are WKB-encoded GeoPandas parquets in H&E pixel space.
+Each row's Xenium `cell_id` is preserved for downstream joins.
 
 **Writes:** `warp/<he_job_id>/he_cell_seg.{parquet,geojson}` and
 `warp/<he_job_id>/he_nucleus_seg.{parquet,geojson}` (and
@@ -215,10 +229,11 @@ GeoJSON.io, `napari-geojson`, …).
 
 ### `celltype` — assign cell-type labels to warped polygons
 
-Assigns a cell-type label to every warped Xenium cell so viz can
-colour the overlay + downstream analysis can filter by class. Two
-source modes; the default now reads labels DIRECTLY off the query
-h5ad (post `rctd-split celltype_writeback`), so no NN mapping is
+Assigns a cell-type label to every warped Xenium cell. Viz
+uses these labels to colour the overlay; downstream analysis
+uses them to filter by class. Two source modes are available.
+The default now reads labels DIRECTLY off the query h5ad
+(post `rctd-split celltype_writeback`), so no NN mapping is
 needed in the normal xenium-preprocess → hexenium flow.
 
 **Default: ranger-direct.** With just `--xenium-h5ad` (or
@@ -237,12 +252,14 @@ xenium-preprocess summary reports use. Zero drift risk.
 
 **Legacy: proseg-NN.** Pass `--proseg-purified-h5ad <path>`
 explicitly (in addition to `--xenium-h5ad`) to switch to the
-original NN-mapping path: for every xenium cell centroid, look up
-the nearest proseg-purified cell and inherit its celltype label.
-Kept for standalone-mode users who don't run xenium-preprocess's
-`rctd-split celltype_writeback` — or for users who want to
-override the ranger labels with a fresh NN fit against a custom
-proseg reference.
+original NN-mapping path. For every xenium cell centroid,
+hexenium looks up the nearest proseg-purified cell and inherits
+its celltype label. This mode is kept for two cases:
+
+1. Standalone-mode users who don't run xenium-preprocess's
+   `rctd-split celltype_writeback`.
+2. Users who want to override the ranger labels with a fresh
+   NN fit against a custom proseg reference.
 
 **Missing / all-NaN column → `unlabeled`.** When the requested
 column doesn't exist, or exists but is entirely NaN / empty, the
@@ -264,13 +281,14 @@ Auto-detection knobs:
   `.obs['x_centroid'/'y_centroid']`, `.obs['x'/'y']`. Override with
   `celltype.{proseg,xenium}_{x,y}_col` in the config YAML.
 
-After the label is joined onto the warped boundaries (via a
+The label is joined onto the warped boundaries via a
 cumcount-augmented merge that survives Dask-emitted duplicate
-`xenium_cell_id` rows), polygon cleanup runs `shapely.make_valid →
-largest connected piece`, drops empty / non-Polygon /
-sub-`area_threshold_px` (default 20 sq px) geometries, and sanity-checks
-for finite coords, ≥3 unique vertices, and `is_valid`. Nuclei without a
-label optionally inherit their sibling cell's label
+`xenium_cell_id` rows. Polygon cleanup then runs
+`shapely.make_valid → largest connected piece`. It drops empty
+/ non-Polygon / sub-`area_threshold_px` (default 20 sq px)
+geometries, and sanity-checks for finite coords, ≥3 unique
+vertices, and `is_valid`. Nuclei without a label optionally
+inherit their sibling cell's label
 (`nuclei_inherit_classification: true`).
 
 **Writes** under `celltyped/<he_job_id>/`:
@@ -289,32 +307,43 @@ label optionally inherit their sibling cell's label
 
 ### `viz` — publication-shape overlay PNG
 
-Draws warped boundaries on a downsampled H&E thumbnail. By default
-(`viz.render_boundaries = nucleus`) only nucleus outlines are drawn — the
-cleanest read of registration quality against H&E's hematoxylin-stained
-nuclei. Two alternatives are exposed via `--viz-render-boundaries`:
-`cell` draws cell polygons (semi-transparent fill) only, and `both`
-draws nucleus outlines on top of the cell polygons. Thumbnails are read
-via OpenSlide with a `tifffile` fallback. Cell-type labels drive a
-qualitative palette (`tab20` by default) with user-configurable
-overrides in `viz.classification_palette`; any label not in the
-override map is auto-assigned a colormap slot in first-appearance order
-(deterministic across re-runs). The renderer is dask-friendly: polygon
-batches are drawn in chunks so a whole-slide overlay does not need to
-fit its geometries in memory as a single frame.
+Draws warped boundaries on a downsampled H&E thumbnail. The
+default (`viz.render_boundaries = nucleus`) draws only nucleus
+outlines. This is the cleanest read of registration quality
+against H&E's hematoxylin-stained nuclei. Two alternatives are
+exposed via `--viz-render-boundaries`: `cell` draws cell
+polygons (semi-transparent fill) only, and `both`
+draws nucleus outlines on top of the cell polygons.
+Thumbnails are read via OpenSlide with a `tifffile` fallback.
+
+Cell-type labels drive a qualitative palette (`tab20` by
+default). Users can override colors in
+`viz.classification_palette`. Any label not in the override
+map is auto-assigned a colormap slot in first-appearance
+order (deterministic across re-runs).
+
+The renderer is dask-friendly: polygon batches are drawn in
+chunks. This lets a whole-slide overlay skip fitting all
+geometries in memory as a single frame.
 
 **Writes:** `viz/<he_job_id>/<sample>_overlay.png` at `viz.dpi` (default
 200 DPI), with a legend of the labels present in the data.
 
 ## Installation
 
-`hexenium` targets Python 3.10+ (validated on 3.11) and depends on
-VALIS, HEST, and their Java/BioFormats bridge (`jpype1`, `openjdk=11`).
-Reproducing the working env requires a **two-step install** — a
-conda-side solve for the system libraries and scientific-Python core,
-then a `--no-deps` pip layer for `hest` / `valis-wsi` / `valis-hest`
-and their transitive stack. Both steps are captured, in the order they
-should be run, in `environments/heRegistration.yml` and
+`hexenium` targets Python 3.10+ (validated on 3.11). It
+depends on VALIS, HEST, and their Java/BioFormats bridge
+(`jpype1`, `openjdk=11`).
+
+Reproducing the working env requires a **two-step install**:
+
+1. A conda-side solve for the system libraries and
+   scientific-Python core.
+2. A `--no-deps` pip layer for `hest` / `valis-wsi` /
+   `valis-hest` and their transitive stack.
+
+Both steps are captured in the order they should be run in
+`environments/heRegistration.yml` and
 `environments/heRegistration-requirements.txt`.
 
 `--no-deps` on the pip step is **load-bearing** and must live on the
@@ -375,32 +404,35 @@ If any of the verification lines errors, jump to
 #### Why `--no-deps` is mandatory
 
 `valis-wsi 1.1`'s declared `Requires-Dist` metadata caps
-`pandas<2.0`, `pyvips<3.0`, and `scikit-image<0.20`. HEST has similar
-declared-vs-actual divergences. Tracy's working env — the one this
-package is validated against — runs the *newer* pandas 2.3.x /
-pyvips 3.1.x / scikit-image 0.19.x branch. VALIS's actual code paths
-never touch the pandas-1 or pyvips-2 API, so the caps are
-over-defensive relative to the code that hexenium actually calls, but
-pip's resolver refuses to install VALIS against pandas 2.x without
+`pandas<2.0`, `pyvips<3.0`, and `scikit-image<0.20`. HEST has
+similar declared-vs-actual divergences. The validated working
+env runs the *newer* pandas 2.3.x / pyvips 3.1.x /
+scikit-image 0.19.x branch. VALIS's actual code paths never
+touch the pandas-1 or pyvips-2 API, so the caps are
+over-defensive relative to the code hexenium calls. But pip's
+resolver refuses to install VALIS against pandas 2.x without
 `--no-deps`. Skipping `--no-deps` yields:
 
 ```
 ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0
 ```
 
-`--no-deps` cannot be inlined into the yml `pip:` block (micromamba
-treats each entry as a package name → `ERROR: Invalid requirement:
---no-deps`) or the top of the requirements file (pip refuses →
-`no such option: --no-deps`), so it lives on the CLI in step 4.
+`--no-deps` cannot be inlined into the yml `pip:` block or
+the top of the requirements file. Micromamba treats each yml
+entry as a package name (`ERROR: Invalid requirement:
+--no-deps`); pip refuses it from a requirements file (`no
+such option: --no-deps`). So the flag lives on the CLI in
+step 4.
 
 #### Why `pip install .` (not `-e`) for end users
 
-An editable install exposes the source tree to `sys.path`, so a stray
-import via a working-directory Python — or a sibling `hexenium/`
-folder in `cwd` — can shadow the installed package and silently pull
-in half-updated modules. Non-editable is safer for end users. If you
-are actively hacking on hexenium, the "Development & testing"
-section further down covers the editable install.
+An editable install exposes the source tree to `sys.path`. A
+stray import via a working-directory Python — or a sibling
+`hexenium/` folder in `cwd` — can then shadow the installed
+package and silently pull in half-updated modules.
+Non-editable is safer for end users. If you are actively
+hacking on hexenium, the "Development & testing" section
+further down covers the editable install.
 
 ### Manual install (bypass the env file)
 
@@ -494,14 +526,18 @@ when a wheel has been yanked from PyPI or a git ref has moved.
 
 The `numpy==1.26.4` and `xarray==2023.10.1` pins in
 `heRegistration.yml` + `heRegistration-requirements.txt` are
-**load-bearing**. A stray `pip install --force-reinstall <pkg>` (or
-unpinned `pip install --upgrade`) re-resolves transitive
-dependencies and can silently pull `numpy 2.x` — which then blows
-`fastcluster`'s compiled extension with `_ARRAY_API not found` /
-`numpy.core.multiarray failed to import`. A parallel drift for
-`xarray` (to 2026.x, needing pandas 2.1's `NumpyExtensionArray`)
-breaks `import anndata` with `AttributeError: module 'pandas.arrays'
-has no attribute 'NumpyExtensionArray'`.
+**load-bearing**.
+
+A stray `pip install --force-reinstall <pkg>` (or unpinned
+`pip install --upgrade`) re-resolves transitive dependencies.
+It can silently pull `numpy 2.x`. That then blows
+`fastcluster`'s compiled extension with `_ARRAY_API not
+found` / `numpy.core.multiarray failed to import`.
+
+A parallel drift for `xarray` (to 2026.x, needing pandas
+2.1's `NumpyExtensionArray`) breaks `import anndata` with
+`AttributeError: module 'pandas.arrays' has no attribute
+'NumpyExtensionArray'`.
 
 **Rule of thumb:** any `pip install --force-reinstall <pkg>` must
 be paired with `--no-deps` OR a co-pinned `numpy==1.26.4`.
@@ -518,32 +554,40 @@ run dir is identical in all three modes.
 
 ### 1. Standalone
 
-Drive with `--sample-id` + `--he-path` + `--xenium-bundle` +
-`--output-root`. Outputs land at `<output_root>/<sample_id>/`. Pass
-`--proseg-purified-h5ad` (and, if you have it, `--xenium-h5ad`) explicitly
-if the `celltype` stage is in `--stages`.
+Drive with `--sample-id` + `--he-slide` + `--xenium-bundle` +
+`--output-root`. Outputs land at `<output_root>/<sample_id>/`.
+
+If the `celltype` stage is in `--stages`, pass `--xenium-h5ad`
+so hexenium can read labels directly off its `.obs[<col>]`
+(the ranger-direct default). Add `--proseg-purified-h5ad`
+only if you want to opt in to the legacy proseg-NN mapping
+instead.
 
 ### 2. Integrated-by-run-id
 
-Add `--run-id <upstream_run_id>` on top of the standalone set. Derives the
-xenium h5ad from the upstream `xenium-preprocess` layout at
-`<output-root>/<sample>/<sample>_<run-id>/spatial_adata/<sample>_xenium_ranger.h5ad`
-and colocates all H&E outputs under
+Add `--run-id <upstream_run_id>` on top of the standalone
+set. Hexenium derives the xenium h5ad from the upstream
+`xenium-preprocess` layout at
+`<output-root>/<sample>/<sample>_<run-id>/spatial_adata/<sample>_xenium_ranger.h5ad`.
+All H&E outputs colocate under
 `<output-root>/<sample>/<sample>_<run-id>/he_registration/`.
-The celltype stage reads its labels directly from this ranger h5ad's
-`.obs["celltype"]` — no proseg lookup by default. Pass
-`--proseg-purified-h5ad <path>` explicitly to switch to the legacy
-proseg-NN code path.
+
+The celltype stage reads its labels directly from this
+ranger h5ad's `.obs["celltype"]` — no proseg lookup by
+default. Pass `--proseg-purified-h5ad <path>` explicitly to
+switch to the legacy proseg-NN code path.
 
 ### 3. Integrated-by-h5ad
 
-Pass `--xenium-h5ad <path>` directly. Sample identity is read from
-`.uns['sample_id']` and `.uns['run_id']` on that h5ad; outputs colocate
-under `<xenium_run_dir>/he_registration/`. Fails LOUD if `.uns` identity
-is missing or disagrees with a passed `--sample-id`. Celltype labels
-still come from this h5ad's `.obs["celltype"]` — same ranger-direct
-default as mode 2; same legacy opt-in via explicit
-`--proseg-purified-h5ad`.
+Pass `--xenium-h5ad <path>` directly. Sample identity is
+read from `.uns['sample_id']` and `.uns['run_id']` on that
+h5ad. Outputs colocate under `<xenium_run_dir>/he_registration/`.
+Fails LOUD if `.uns` identity is missing or disagrees with a
+passed `--sample-id`.
+
+Celltype labels still come from this h5ad's
+`.obs["celltype"]`. Same ranger-direct default as mode 2;
+same legacy opt-in via explicit `--proseg-purified-h5ad`.
 
 ## Quickstart
 
@@ -565,18 +609,24 @@ hexenium run \
 ```
 
 For a **standalone** run (no upstream xenium-preprocess tree), point at
-the celltype sources explicitly:
+the celltype source explicitly — pass `--xenium-h5ad` for the
+ranger-direct default:
 
 ```bash
 hexenium run \
-    --sample-id             SAMPLE1 \
-    --he-slide              /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
-    --xenium-bundle         /data/SAMPLE1/xenium/output-XETG.../ \
-    --dapi-path             /data/SAMPLE1/xenium/output-XETG.../morphology_focus/ch0000_dapi.ome.tif \
-    --xenium-h5ad           /data/SAMPLE1/spatial_adata/SAMPLE1_xenium_ranger.h5ad \
-    --proseg-purified-h5ad  /data/SAMPLE1/spatial_adata/SAMPLE1_proseg_purified.h5ad \
-    --output-root           /data/hexenium_runs
+    --sample-id      SAMPLE1 \
+    --he-slide       /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
+    --xenium-bundle  /data/SAMPLE1/xenium/output-XETG.../ \
+    --dapi-path      /data/SAMPLE1/xenium/output-XETG.../morphology_focus/ch0000_dapi.ome.tif \
+    --xenium-h5ad    /data/SAMPLE1/spatial_adata/SAMPLE1_xenium_ranger.h5ad \
+    --output-root    /data/hexenium_runs
 ```
+
+For the legacy proseg-NN mapping instead, add
+`--proseg-purified-h5ad /data/SAMPLE1/spatial_adata/SAMPLE1_proseg_purified.h5ad`
+to the invocation above. See [`celltype` — assign cell-type
+labels to warped polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
+for when to reach for it.
 
 `--dapi-path` is only needed for multichannel Xenium bundles where the
 DAPI lives at `morphology_focus/ch0000_dapi.ome.tif` instead of the
@@ -660,10 +710,11 @@ Each per-run logs dir carries the Slurm `.out`/`.err` and a
 
 ## Configuration
 
-Every knob is defined in `config/default.yaml` with a comment explaining
-its effect. Override any subset with a user YAML (`hexenium run --config
-user.yaml …`) or spot-override on the CLI. CLI overrides win over user
-YAML which wins over the default.
+Every knob is defined in `src/hexenium/_defaults/default.yaml`
+with a comment explaining its effect. Override any subset with
+a user YAML (`hexenium run --config user.yaml …`) or
+spot-override on the CLI. CLI overrides win over user YAML.
+User YAML wins over the default.
 
 ### Most-tuned knobs
 
@@ -688,9 +739,11 @@ The knobs most runs actually touch:
 
 ### Registration algorithm knobs
 
-The `register` stage's numeric parameters live under `registration:` and
-`parameters:` in `config/default.yaml`. Every one is CLI-overridable
-(dash-cased flag) and YAML-overridable (dot path).
+The `register` stage's numeric parameters live under
+`registration:` and `parameters:` in
+`src/hexenium/_defaults/default.yaml`. Every one is
+CLI-overridable (dash-cased flag) and YAML-overridable (dot
+path).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
@@ -710,37 +763,46 @@ micro raises `TypeError: 'NoneType' object is not subscriptable` in
 `valis_hest.registration.py:register_micro`. Use `rigid_only`,
 `rigid_nonrigid`, or `full_with_micro`.
 
-See `config/default.yaml` for the full list (Dask worker settings, JVM
-memory, palette overrides, per-stage rounding for QuPath vs. analysis
-outputs).
+See `src/hexenium/_defaults/default.yaml` for the full list.
+That file covers Dask worker settings, JVM memory, palette
+overrides, and per-stage rounding for QuPath vs. analysis
+outputs.
 
 ## Repro / re-run behaviour
 
-- **Sentinel-file resume.** Each stage checks for its sentinel output(s)
-  before starting; if present and `--force-rerun` isn't set, the stage
-  is skipped and its outputs are threaded through to the next stage.
-- **Per-invocation sharding.** `register/`, `warp/`, `celltyped/`, `viz/`
-  all shard under `<he_job_id>/`, so a new run under a new Slurm job id
-  never clobbers a prior run's outputs. `celltype` and `viz` reading an
-  earlier stage's outputs default to the same `<he_job_id>`; point them at
-  a prior run with `--warp-run-id` / `--celltype-run-id`.
-- **Config snapshot.** Every run writes `resolved_config.yaml` into its
-  logs dir (see [Output tree](#output-tree)) — the exact merged defaults
-  + user YAML + CLI overrides that shaped the run. Integrated modes also
-  merge a `he_registration:` key into the xenium run dir's shared
-  `resolved_config.yaml` for cross-pipeline provenance.
-- **VSI conversion is per-sample, not per-run.** The converted OME-TIFF
-  lives next to the source VSI (or the pipeline-tree fallback) and is
-  reused by every invocation for that sample. `--force-preprocess`
-  triggers a re-conversion without touching downstream sentinels.
+- **Sentinel-file resume.** Each stage checks for its sentinel
+  output(s) before starting. If present and `--force-rerun`
+  isn't set, the stage is skipped. Its outputs are threaded
+  through to the next stage.
+- **Per-invocation sharding.** `register/`, `warp/`,
+  `celltyped/`, `viz/` all shard under `<he_job_id>/`. A new
+  run under a new Slurm job id never clobbers a prior run's
+  outputs. `celltype` and `viz` reading an earlier stage's
+  outputs default to the same `<he_job_id>`. Point them at a
+  prior run with `--warp-run-id` / `--celltype-run-id`.
+- **Config snapshot.** Every run writes
+  `resolved_config.yaml` into its logs dir (see [Output
+  tree](#output-tree)). This is the exact merged defaults +
+  user YAML + CLI overrides that shaped the run. Integrated
+  modes also merge a `he_registration:` key into the xenium
+  run dir's shared `resolved_config.yaml` for cross-pipeline
+  provenance.
+- **VSI conversion is per-sample, not per-run.** The
+  converted OME-TIFF lives next to the source VSI (or the
+  pipeline-tree fallback). It is reused by every invocation
+  for that sample. `--force-preprocess` triggers a
+  re-conversion without touching downstream sentinels.
 
 ## HPC usage (Slurm)
 
-The bundled wrapper `scripts/submit_he_registration.sh` is designed to be
-called **directly** (no `sbatch` prefix); it self-submits under sbatch and
-routes its own `.out`/`.err` under the run folder's logs dir. Under the
-hood it does two-phase `sbatch --hold` → mkdir per-job-id dir → release,
-so Slurm's log-dir-must-exist-at-job-start requirement is met.
+The bundled wrapper `scripts/submit_he_registration.sh` is
+designed to be called **directly** (no `sbatch` prefix). It
+self-submits under sbatch and routes its own `.out`/`.err`
+under the run folder's logs dir.
+
+Under the hood it does two-phase `sbatch --hold` → mkdir
+per-job-id dir → release. This meets Slurm's
+log-dir-must-exist-at-job-start requirement.
 
 `#SBATCH` header in the wrapper (tune to your cluster):
 
@@ -805,16 +867,21 @@ Slurm's own `slurm-<jobid>.out` in `cwd` captures everything;
 `PYTHONUNBUFFERED=1` (which `hexenium` sets internally) keeps stdout
 line-buffered.
 
-**Resource sizing.** Under the default `--mode full_with_micro`, a
-typical whole-slide run takes 2–2.5 h wall-clock — the `register` step is
-30–60 min for rigid + non-rigid, and `register_micro` adds another 30 min
-– 2 h on top depending on tissue size. Warp + celltype + viz add another
-30–60 min. The 2-day `--time` in the wrapper is the honest ceiling for
-`full_with_micro` on large samples; a `--mode rigid_only` diagnostic
-sweep completes in well under an hour. 196 GB memory is sized for the
-non-rigid + micro solve at `max_non_rigid_registration_dim_px = 10000`
-plus the Dask warp cluster; drop to 128 GB only if you also drop that
-cap.
+**Resource sizing.** Under the default `--mode
+full_with_micro`, a typical whole-slide run takes 2–2.5 h
+wall-clock. Breakdown:
+
+- `register` (rigid + non-rigid): 30–60 min.
+- `register_micro`: 30 min – 2 h, depending on tissue size.
+- Warp + celltype + viz: another 30–60 min.
+
+The 2-day `--time` in the wrapper is the honest ceiling for
+`full_with_micro` on large samples. A `--mode rigid_only`
+diagnostic sweep completes in well under an hour.
+
+196 GB memory is sized for the non-rigid + micro solve at
+`max_non_rigid_registration_dim_px = 10000` plus the Dask
+warp cluster. Drop to 128 GB only if you also drop that cap.
 
 ### VSI inputs: automatic BioFormats conversion (unified)
 
@@ -834,10 +901,10 @@ and the launcher:
    `--dependency=afterok:<conv_jobid>` so it runs only when the
    conversion finishes cleanly.
 
-Both jobs are independent slurm records — a hexenium rerun
+Both jobs are independent slurm records. A hexenium rerun
 (different `--mode`, `--warp-run-id`, etc.) reuses the
 converted OME-TIFF without redoing the ~15-25-min BioFormats
-step, and each job's `slurm-<jobid>.out/err` lives at a stable
+step. Each job's `slurm-<jobid>.out/err` lives at a stable
 log path.
 
 **Idempotency**. The converted file is reused on subsequent
@@ -894,9 +961,9 @@ Submitted batch job 12345 (logs: SAMPLE1_12345_all)
 ```
 
 On a rerun with the same `--run-id`, the launcher notices the
-canonical OME-TIFF is already present and prints
-`[submit] skipping VSI conversion` — only the hexenium job is
-submitted, no `--dependency` wait, starts immediately.
+canonical OME-TIFF is already present. It prints
+`[submit] skipping VSI conversion`. Only the hexenium job is
+submitted — no `--dependency` wait, starts immediately.
 
 ### Standalone conversion scripts (advanced)
 
@@ -920,10 +987,14 @@ subdirectory next to their outputs.
 
 ## Development & testing
 
-The test suite covers CLI parsing, config validation, layout resolution
-for the three invocation modes, celltyping (auto-detect, NN mapping,
-polygon cleanup), viz `render_boundaries` variants, stage imports, and an
-end-to-end pipeline smoke test.
+The test suite covers:
+
+- CLI parsing and config validation.
+- Layout resolution for the three invocation modes.
+- Celltyping (auto-detect, NN mapping, polygon cleanup).
+- Viz `render_boundaries` variants.
+- Stage imports.
+- An end-to-end pipeline smoke test.
 
 ```bash
 pip install -e '.[test]'
