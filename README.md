@@ -38,7 +38,7 @@ The Python package + console script is **`hexenium`** (`pip install .`
 under the tested **`heRegistration`** conda env). The env name is the
 default `ENV_NAME` for the sbatch wrapper.
 
-Table of contents: [What it does](#what-it-does) · [Installation](#installation) · [Invocation modes](#invocation-modes) · [Quickstart](#quickstart) · [Output tree](#output-tree) · [Configuration](#configuration) · [HPC (Slurm)](#hpc-usage-slurm) · [Development & testing](#development--testing) · [Citation](#citation) · [License](#license) · [Acknowledgements](#acknowledgements)
+Table of contents: [What it does](#what-it-does) · [Pipeline overview](#pipeline-overview) · [Installation](#installation) · [Invocation modes](#invocation-modes) · [Quickstart](#quickstart) · [Output tree](#output-tree) · [Configuration](#configuration) · [HPC (Slurm)](#hpc-usage-slurm) · [Development & testing](#development--testing) · [Citation](#citation) · [License](#license) · [Acknowledgements](#acknowledgements)
 
 ## What it does
 
@@ -46,6 +46,93 @@ Five stages, run in order (`he_preprocess → register → warp → celltype →
 viz`). Restrict a run to a subset with `--stages`; each stage is guarded
 by a sentinel file, so re-running with the same identity picks up where
 the last run left off. Nuke sentinels with `--force-rerun`.
+
+## Pipeline overview
+
+Five stages plus an optional VSI conversion job (Path B), chained by
+`--dependency=afterok:` on Slurm when the input is a `.vsi` file.
+Per-stage outputs colocate under
+`<output-root>/<sample>/<sample>_<run-id>/he_registration/` (the
+canonical layout that xenium-preprocess-pipeline peers with):
+
+```
+    H&E slide                    hexenium pipeline                   per-run outputs
+                                                                     (<output-root>/<sample>/
+    ┌────────────────┐        ┌───────────────────┐                   <sample>_<run-id>/
+    │ .vsi or        │───────▶│ he_preprocess     │──┐                he_registration/)
+    │ .ome.tif       │        │ VSI → OME-TIFF    │  │
+    └────────────────┘        │ (no-op for TIFF)  │  │
+                              └───────────────────┘  │
+                                                     ▼
+                                    converted/<sample>_he.ome.tif
+                                                     │
+                                                     │
+    Xenium bundle                                    │
+    ┌────────────────┐        ┌───────────────────┐  │
+    │ output-XETG..  │───────▶│ register          │◀─┘
+    │ + morphology_  │        │ VALIS DAPI ↔ H&E  │
+    │   focus/       │        │ (rigid + non-     │
+    └────────────────┘        │  rigid + micro)   │
+                              └───────────────────┘
+                                        │
+                                        ▼
+                              register/<he_job_id>/data/_registrar.pickle
+                                        │
+                                        │
+                              ┌───────────────────┐
+                              │ warp              │
+                              │ Xenium cell +     │
+                              │ nucleus polygons  │
+                              │ → H&E pixel space │
+                              └───────────────────┘
+                                        │
+                                        ▼
+                              warp/<he_job_id>/he_cell_seg.parquet
+                              warp/<he_job_id>/he_nucleus_seg.parquet
+                                        │
+    xenium-preprocess                   │
+    ┌────────────────┐        ┌───────────────────┐
+    │ proseg_puri-   │───────▶│ celltype          │
+    │  fied.h5ad +   │        │ NN celltype       │
+    │ xenium_ran-    │        │ mapping           │
+    │  ger.h5ad      │        │ (proseg → xenium) │
+    └────────────────┘        └───────────────────┘
+                                        │
+                                        ▼
+                              celltyped/<he_job_id>/
+                                 <sample>_cells_analysis.geojson
+                                 <sample>_nuclei_analysis.geojson
+                                 <sample>_cells_qupath.geojson
+                                 <sample>_nuclei_qupath.geojson
+                                 <sample>_celltyped_wholeslide.parquet
+                                        │
+                                        ▼
+                              ┌───────────────────┐
+                              │ viz               │
+                              │ H&E overlay PNG   │
+                              │ + summary.html    │
+                              └───────────────────┘
+                                        │
+                                        ▼
+                              viz/<he_job_id>/<sample>_overlay.png
+                              output/summary.html
+                              output/{register,warp,celltyped,viz}   [symlinks]
+```
+
+`he_preprocess` is skipped automatically when `--he-slide` is already
+`.ome.tif` / `.ome.tiff` / `.tif`. When it IS a `.vsi`,
+`submit_he_registration.sh` submits a `bioformats2raw` +
+`raw2ometiff` conversion job as a separate Slurm record, then
+submits the hexenium job with `--dependency=afterok:<conv_jobid>`
+so the two stay independent — see [HPC usage
+(Slurm)](#hpc-usage-slurm).
+
+`--set-default-on-success` re-points `output/{register,warp,celltyped,viz}`
+symlinks at the fresh `<he_job_id>` at the tail of the run.
+See [Multi-registration workflows](#invocation-modes) for how to
+compare parallel registrations before promoting the winner.
+
+Per-stage descriptions below.
 
 ### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
 
