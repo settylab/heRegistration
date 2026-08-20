@@ -103,46 +103,75 @@ the canonical layout that xenium-preprocess-pipeline peers with:
                               output/{register,warp,celltyped,viz}   [symlinks]
 ```
 
-`he_preprocess` is skipped automatically when `--he-slide` is
-already `.ome.tif` / `.ome.tiff` / `.tif`. When the input is a
-`.vsi`, `submit_he_registration.sh` submits two Slurm records.
-The first runs `bioformats2raw` + `raw2ometiff` conversion.
-The second submits hexenium with
-`--dependency=afterok:<conv_jobid>` so the two jobs stay
-independent. See [HPC usage (Slurm)](#hpc-usage-slurm).
+### H&E input handling
 
-`--set-default-on-success` re-points `output/{register,warp,celltyped,viz}`
-symlinks at the fresh `<he_job_id>` at the tail of the run. To
-compare parallel registrations before promoting a winner, run
-hexenium N times without `--set-default-on-success`, then
-promote the winner with `--register-run-id <he_job_id>
---set-default-on-success`.
+Hexenium accepts two H&E input types.
 
-**Celltype input requirement.** The default celltype driver is
-"ranger-direct" (commit `770e3fe`). `celltype` reads a celltype
-label column directly from `xenium_ranger.h5ad`'s `.obs`. So
-the `.h5ad` you pass as `--xenium-h5ad` MUST already carry
-that column. The same applies to the h5ad hexenium derives
-from `--run-id` under `<xenium_run_dir>/spatial_adata/`.
+**OME-TIFF / TIFF** (`.ome.tif`, `.ome.tiff`, `.tif`) — used
+as-is. The `he_preprocess` stage is a no-op.
 
-Column-name resolution walks a first-match-wins list
-(`src/hexenium/stages/celltyping.py:_CELLTYPE_COL_CANDIDATES`):
-`celltype > first_type > primary_cell_type > celltype_updated`.
+**Olympus `.vsi`** — the HPC driver
+(`submit_he_registration.sh`) auto-converts to OME-TIFF via
+BioFormats before running hexenium. Conversion runs as a
+separate Slurm job; hexenium waits on
+`--dependency=afterok:<conv_jobid>`. Reruns reuse the
+converted file. See [HPC usage — VSI
+inputs](#vsi-inputs-automatic-bioformats-conversion-unified)
+for install requirements and options.
 
-Override with `--celltype-col <name>` when the column is named
-differently. The resolver still requires the column to exist
-on `.obs`; it just skips the auto-scan.
+### Choosing / promoting the default registration
 
-**Legacy proseg-→-xenium NN mapping.** Opt in by passing
-`--proseg-purified-h5ad <path>` in addition to the xenium
-h5ad. In this mode, hexenium spatially NN-maps proseg
-celltype labels onto the xenium cells (the pre-`770e3fe`
-default). See [`celltype` — assign cell-type labels to warped
-polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
-for details.
+Every stage writes into its own `<he_job_id>` shard. The
+`output/{register,warp,celltyped,viz}` symlinks point at the
+"default" run per stage, so `output/register/` etc. always
+show one canonical run for browsing.
 
-Per-stage descriptions are in [Stage details](#stage-details)
-below the pipeline overview → installation → quickstart flow.
+**Auto-promote on success.** Add `--set-default-on-success`
+to `hexenium run`. When the run completes cleanly, the
+symlinks are repointed at its fresh `<he_job_id>`.
+
+**Compare N registrations, then promote manually.** Run
+hexenium N times without `--set-default-on-success`, review
+each `register/<he_job_id>/` shard, then promote the winner:
+
+```bash
+hexenium set-default-run \
+    --output-root <output_root> \
+    --sample-id   <sample> \
+    --run-id      <upstream_run_id> \
+    --register-run-id <winning_he_job_id>
+```
+
+`hexenium set-default-run --help` lists the per-stage flags
+(`--register-run-id`, `--warp-run-id`, `--celltype-run-id`,
+`--viz-run-id`) — you can retarget any subset independently.
+
+### Celltype input
+
+The `celltype` stage assigns a cell-type label to every
+warped Xenium cell. Two source modes.
+
+**Default: ranger-direct.** With just `--xenium-h5ad` (or
+the h5ad hexenium derives from `--run-id`), the stage reads
+labels straight from `.obs["celltype"]`. The h5ad must
+already carry that column. Override the column name with
+`--celltype-col <name>` if yours is called something
+different (`--celltype-col auto` walks a small
+first-match-wins list).
+
+**Legacy: proseg-NN mapping.** Add `--proseg-purified-h5ad
+<path>` to switch to spatial NN-mapping of proseg labels
+onto xenium cells. Reach for this if you don't have a ranger
+h5ad with a celltype column, or if you want to override the
+ranger labels with a fresh NN fit against a custom proseg
+reference.
+
+If the requested column is missing or entirely empty, the
+stage labels every row `unlabeled` (rendered grey `#888888`)
+and continues. No crash.
+
+See the [`celltype` stage docs](#celltype--assign-cell-type-labels-to-warped-polygons)
+for column-resolution precedence and the full set of knobs.
 
 ## Stage details
 
