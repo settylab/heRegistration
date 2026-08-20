@@ -51,7 +51,17 @@ dependencies = [
     "tifffile",
     "anndata",
     "scanpy",
-    "opencv-python",
+    # OpenCV: MUST be `opencv-contrib-python` (NOT stock `opencv-python`).
+    # `valis_hest.feature_detectors` imports `cv2.xfeatures2d.VGG_create`
+    # + other non-free algorithms that only exist in the contrib variant.
+    # The four opencv PyPI packages (stock / contrib × headless / not)
+    # install into the SAME `cv2/` directory and are meant to be mutually
+    # exclusive: declaring stock here means `pip install .` (or the
+    # editable equivalent) reinstalls stock over any contrib variant a
+    # separate `pip install --no-deps -r requirements.txt` step landed,
+    # and `cv2.xfeatures2d` loads empty. Full diagnostic:
+    # https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5351293103
+    "opencv-contrib-python",
     "jpype1",
 ]
 

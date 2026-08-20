@@ -99,6 +99,16 @@ working-directory Python — or a sibling `hexenium/` folder in
 `cwd` — can shadow the installed package and silently pull in
 half-updated modules.
 
+Both commands resolve `pyproject.toml`'s declared deps against the
+env you already prepared in steps 2-4, and the pins are loose
+enough to accept what's already installed (no re-downloads
+expected). Notably, `pyproject.toml` declares
+`opencv-contrib-python` — matching what step 2 pinned + what
+`valis_hest` requires — so this step doesn't clobber the contrib
+`cv2/` files with stock ones. See the OpenCV drift entry in
+"Bugs & fixes" below if you're recovering an env that ended up
+with `opencv-python` on top of `opencv-contrib-python`.
+
 ## 6. (Optional) HEST from an editable local clone
 
 The requirements file already installs HEST from the `mahmoodlab/HEST`
