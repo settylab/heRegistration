@@ -1,51 +1,44 @@
 # hexenium
 
-**Single-sample H&E ↔ Xenium DAPI registration, warp, cell-type propagation, and overlay visualisation.**
+**H&E ↔ Xenium registration pipeline.** Align a hematoxylin-and-eosin
+whole-slide image to a matched Xenium in-situ transcriptomics run,
+warp Xenium cell + nucleus segmentations into H&E pixel space, and
+render a per-slide celltype-annotated overlay — one CLI invocation
+per sample.
 
-> **v0.2.0** — celltype reads labels DIRECTLY off `xenium_ranger.h5ad`
-> (`.obs["celltype"]`, written by upstream `rctd-split`'s
-> `celltype_writeback`). Legacy proseg-NN mode preserved as an
-> opt-in via explicit `--proseg-purified-h5ad`. Missing / all-NaN
-> column falls to `unlabeled` (grey `#888888`). Three invocation
-> modes (standalone / integrated-by-run-id / integrated-by-h5ad);
-> per-stage outputs sharded under `register/<he_job_id>/`,
-> `warp/<he_job_id>/`, `celltyped/<he_job_id>/`, `viz/<he_job_id>/`.
-> See [CHANGELOG.md](CHANGELOG.md) for the full delta and migration
-> notes from v0.1.x.
+- **CLI**: `hexenium run …` (Python package + console script).
+- **Env**: pinned conda + pip layer at
+  `environments/heRegistration.yml`. Default env name
+  `heRegistration`.
+- **HPC**: `scripts/submit_he_registration.sh …` self-submits to
+  Slurm, handles VSI inputs via an `afterok:` conversion chain, and
+  routes logs into the run tree.
 
-At a glance:
+Under the hood: [VALIS](https://github.com/MathOnco/valis)
+(via `valis_hest`) for the registration solve, HEST for the
+boundary warp; five stages
+(`he_preprocess → register → warp → celltype → viz`), each guarded
+by a sentinel file so reruns pick up where the last invocation
+left off.
 
-- **Register** a hematoxylin and eosin (H&E) whole-slide image against the
-  DAPI morphology channel of a matched Xenium in-situ transcriptomics run
-  (VALIS via `valis_hest`), composing rigid, non-rigid, and
-  micro-registration transforms into a single registrar.
-- **Warp** Xenium cell + nucleus polygon boundaries from Xenium pixel space
-  into H&E pixel space (HEST `warp_and_save_xenium_objects`).
-- **Propagate** cell-type labels — default reads them directly from
-  `xenium_ranger.h5ad`'s `.obs["celltype"]` (populated by upstream
-  `rctd-split celltype_writeback`); legacy proseg-NN mode preserved
-  via explicit `--proseg-purified-h5ad`. Missing / all-NaN column
-  falls to `unlabeled`. Nuclei can inherit their sibling cell's label.
-- **Visualise** with a publication-quality overlay: nucleus outlines on a
-  downsampled H&E thumbnail, coloured by cell-type label. Add cell polygons
-  with `--viz-render-boundaries both`.
-- Every stage is idempotent — sentinel-file resume — and every run
-  snapshots its resolved configuration to disk.
+**Contents**: [Pipeline overview](#pipeline-overview) ·
+[Installation](#installation) · [Quickstart](#quickstart) ·
+[Invocation modes](#invocation-modes) · [Stage details](#stage-details) ·
+[Output tree](#output-tree) · [Configuration](#configuration) ·
+[HPC / Slurm](#hpc-usage-slurm) ·
+[Re-runs & resume](#repro--re-run-behaviour) ·
+[Development & testing](#development--testing) ·
+[Citation](#citation)
 
-## Package name
-
-The Python package + console script is **`hexenium`** (`pip install .`
-under the tested **`heRegistration`** conda env). The env name is the
-default `ENV_NAME` for the sbatch wrapper.
-
-Table of contents: [What it does](#what-it-does) · [Pipeline overview](#pipeline-overview) · [Installation](#installation) · [Invocation modes](#invocation-modes) · [Quickstart](#quickstart) · [Output tree](#output-tree) · [Configuration](#configuration) · [HPC (Slurm)](#hpc-usage-slurm) · [Development & testing](#development--testing) · [Citation](#citation) · [License](#license) · [Acknowledgements](#acknowledgements)
-
-## What it does
-
-Five stages, run in order (`he_preprocess → register → warp → celltype →
-viz`). Restrict a run to a subset with `--stages`; each stage is guarded
-by a sentinel file, so re-running with the same identity picks up where
-the last run left off. Nuke sentinels with `--force-rerun`.
+> **v0.2.0 highlights** — Celltype now reads labels DIRECTLY off
+> `xenium_ranger.h5ad`'s `.obs[<col>]` (ranger-direct, default);
+> legacy proseg-→-xenium NN mapping preserved as an opt-in via
+> `--proseg-purified-h5ad`. Missing / all-NaN column falls to
+> `unlabeled` (grey `#888888`). Per-stage outputs sharded under
+> `register/<he_job_id>/` / `warp/<he_job_id>/` / etc. Automatic
+> BioFormats-backed VSI conversion when `--he-slide` is a `.vsi`
+> file (Path B, unified into `submit_he_registration.sh`). See
+> [CHANGELOG.md](CHANGELOG.md) for the full delta.
 
 ## Pipeline overview
 
@@ -154,7 +147,10 @@ the xenium h5ad. See [`celltype` — assign cell-type labels to
 warped polygons](#celltype--assign-cell-type-labels-to-warped-polygons)
 for details.
 
-Per-stage descriptions below.
+Per-stage descriptions are in [Stage details](#stage-details)
+below the pipeline overview → installation → quickstart flow.
+
+## Stage details
 
 ### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
 
@@ -902,65 +898,25 @@ canonical OME-TIFF is already present and prints
 `[submit] skipping VSI conversion` — only the hexenium job is
 submitted, no `--dependency` wait, starts immediately.
 
-### Path B — standalone conversion (advanced / debug)
+### Standalone conversion scripts (advanced)
 
-Two auxiliary launchers cover cases where you want to run just
-ONE of the two steps in isolation from the unified flow above:
+Two auxiliary launchers cover the rare cases the unified flow
+above doesn't handle cleanly:
 
 - `scripts/submit_vsi_to_ometiff.sh` — VSI → OME-TIFF only. Use
-  when you want to prime a shared cache of converted files
-  outside a specific `--run-id`, or debug conversion parameters
-  (`--vsi-series`, `--max-workers`) in isolation from
-  hexenium.
+  to prime a shared cache of converted files outside a specific
+  `--run-id`, or to debug conversion parameters
+  (`--vsi-series`, `--max-workers`) in isolation.
+  Same install prerequisites as above.
 - `scripts/submit_hexenium_from_ometiff.sh` — hexenium against
-  an already-converted OME-TIFF, no auto-VSI logic. Use when
-  you have an OME-TIFF from a different producer (Trident /
-  QuPath / bfconvert) at a non-canonical path.
+  an already-converted OME-TIFF at a non-canonical path (e.g.
+  a Trident / QuPath / `bfconvert` output). Thin dispatcher to
+  `submit_he_registration.sh` — forwards every hexenium flag
+  untouched.
 
-Both are unchanged from the shape they landed in at commit
-`8840bec`; the new unified `submit_he_registration.sh`
-supersedes them for the 90 %+ common case.
-
-**Prerequisites**: same as the unified path above (per-env
-install of `bioformats2raw` + `raw2ometiff` + `c-blosc`, OR
-`BFTOOLS_ROOT` + `LIBBLOSC_DIR` fallback).
-
-**Example — step-1 only** (prime a shared cache):
-
-```bash
-./scripts/submit_vsi_to_ometiff.sh \
-    --vsi         /path/to/SAMPLE.vsi \
-    --out-dir     /path/to/converted \
-    --sample-id   SAMPLE \
-    [--env-name   heRegistration] \
-    [--series     N]
-```
-
-Prints `Submitted batch job <jobid>` and routes logs to
-`<out-dir>/logs/SAMPLE_vsi2ometiff_<jobid>.{out,err}`. Wall-clock
-is ~15-25 min for a ~3 GB Olympus WSI on `campus-new`. Output
-includes per-series `<sample>_he_s<N>.ome.tiff` files AND a
-canonical `<sample>_he.ome.tif` symlink pointing at the
-auto-selected (or user-specified) full-res series.
-
-**Example — step-2 only** (hexenium against an existing OME-TIFF):
-
-```bash
-./scripts/submit_hexenium_from_ometiff.sh \
-    --he-ometiff       /path/to/converted/SAMPLE_he.ome.tif \
-    --sample-id        SAMPLE \
-    --run-id           demo_v1 \
-    --output-root      /data/xenium_runs \
-    --xenium-bundle    /data/SAMPLE/xenium/output-XETG.../ \
-    --dapi-path        /data/SAMPLE/xenium/output-XETG.../morphology_focus/morphology_focus_0000.ome.tif \
-    [--env-name        heRegistration] \
-    [--stages          register warp celltype viz]
-```
-
-Thin dispatcher to `submit_he_registration.sh` — accepts every
-hexenium flag (`--mode`, `--warp-run-id`, `--celltype-col`,
-`--set-default-on-success`, `--force-rerun`, ...) and forwards
-untouched.
+Both are called the same way, with `--help` support and
+`Submitted batch job <jobid>` output routed to a `logs/`
+subdirectory next to their outputs.
 
 ## Development & testing
 
