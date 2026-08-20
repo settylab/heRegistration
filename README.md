@@ -104,26 +104,54 @@ space; each row's Xenium `cell_id` is preserved for downstream joins.
 for programmatic downstream use, GeoJSON for viewers (QuPath,
 GeoJSON.io, `napari-geojson`, …).
 
-### `celltype` — proseg → xenium NN mapping onto warped polygons
+### `celltype` — assign cell-type labels to warped polygons
 
-Assigns a cell-type label to every warped Xenium cell by nearest-neighbour
-lookup on centroids. Source of labels is an upstream
-`proseg_purified.h5ad` (its `.obs` carries the cell-type column and
-per-cell centroids in Xenium µm); query is the matched xenium h5ad
-(its `.obs` carries Xenium UUID `cell_id`s and centroids). No CSV, no
-ID join — every Xenium cell is labelled by NN on the proseg side.
+Assigns a cell-type label to every warped Xenium cell so viz can
+colour the overlay + downstream analysis can filter by class. Two
+source modes; the default now reads labels DIRECTLY off the query
+h5ad (post `rctd-split celltype_writeback`), so no NN mapping is
+needed in the normal xenium-preprocess → hexenium flow.
 
-Auto-detection is deliberate:
+**Default: ranger-direct.** With just `--xenium-h5ad` (or
+`--run-id` auto-deriving it), hexenium reads
+`xenium_ranger.h5ad`'s `.obs[<celltype_col>]` for every cell.
+Default column: `celltype` (matches
+`packages/rctd-split/config/default.yaml`'s
+`celltype_writeback.celltype_col`). Pass `--celltype-col <name>` to
+override for a custom-built ranger h5ad. `--celltype-col auto`
+falls through the historic precedence
+`celltype > first_type > primary_cell_type > celltype_updated`.
 
-- **celltype column** on proseg (`--celltype-col`, default `auto`) —
-  precedence `celltype` > `first_type` > `primary_cell_type` >
-  `celltype_updated`. Pass a literal column name to force a choice.
+No NN mapping in this mode — the label comes straight off the
+query h5ad, so hexenium's overlay uses THE SAME labels the
+xenium-preprocess summary reports use. Zero drift risk.
+
+**Legacy: proseg-NN.** Pass `--proseg-purified-h5ad <path>`
+explicitly (in addition to `--xenium-h5ad`) to switch to the
+original NN-mapping path: for every xenium cell centroid, look up
+the nearest proseg-purified cell and inherit its celltype label.
+Kept for standalone-mode users who don't run xenium-preprocess's
+`rctd-split celltype_writeback` — or for users who want to
+override the ranger labels with a fresh NN fit against a custom
+proseg reference.
+
+**Missing / all-NaN column → `unlabeled`.** When the requested
+column doesn't exist, or exists but is entirely NaN / empty, the
+stage logs a WARN and labels every row `unlabeled`. Viz renders
+`unlabeled` as grey `#888888`. Per-row NaN / empty values also
+fall to `unlabeled` (only the affected rows). No crash.
+
+Auto-detection knobs:
+
+- **celltype column** (`--celltype-col`, default `celltype`) — set
+  to `auto` for precedence walk; set to a literal column name to
+  force a choice; unmatched → `unlabeled` fallback.
 - **Xenium id column** (`--id-col`, default `auto`) — every candidate is
   shape-checked against the Xenium UUID regex (`^[a-z]{8}-\d+$`) before
   use, so it can't silently pick Proseg's int64 index masquerading as
   `cell_id`. Special value `__index__` reads from `.obs.index`.
-- **spatial coords** — checks `.obsm['spatial']` first, then falls back
-  through `.obs['centroid_x'/'centroid_y']`,
+- **spatial coords** (proseg-NN mode only) — checks `.obsm['spatial']`
+  first, then falls back through `.obs['centroid_x'/'centroid_y']`,
   `.obs['x_centroid'/'y_centroid']`, `.obs['x'/'y']`. Override with
   `celltype.{proseg,xenium}_{x,y}_col` in the config YAML.
 
@@ -528,9 +556,9 @@ The knobs most runs actually touch:
 | `--mode` / `registration.mode` | `full_with_micro` | `rigid_only`, `rigid_nonrigid`, or `full_with_micro`. `rigid_only_micro` is invalid — see below. |
 | `--use-he-deconvolution` / `registration.use_he_deconvolution` | `true` | Macenko-style H&E stain deconvolution before registration. Override with `false` on faint-hematoxylin samples. |
 | `--dapi-path` / `dapi_path` | derived from `xenium_bundle` | Pass explicitly for multichannel bundles (`morphology_focus/ch0000_dapi.ome.tif`). |
-| `--proseg-purified-h5ad` / `proseg_purified_h5ad` | integrated modes: auto-derived; standalone: required for `celltype` stage | Upstream proseg h5ad whose `.obs` carries celltype labels + centroids. |
-| `--xenium-h5ad` / `xenium_h5ad` | integrated modes: auto; standalone: required for `celltype` | Query xenium h5ad. Also the identity source in integrated-by-h5ad mode. |
-| `--celltype-col` / `celltype.celltype_col` | `auto` | Force a specific celltype column on the proseg side. |
+| `--proseg-purified-h5ad` / `proseg_purified_h5ad` | (unset) | **Legacy proseg-NN mode opt-in.** Explicit → celltype falls back to the historic NN-mapping code path. Not needed in the standard xenium-preprocess → hexenium flow (default ranger-direct). |
+| `--xenium-h5ad` / `xenium_h5ad` | integrated modes: auto; standalone: required for `celltype` | Query xenium h5ad. Default source for celltype labels (read directly from `.obs[<celltype_col>]`). Also the identity source in integrated-by-h5ad mode. |
+| `--celltype-col` / `celltype.celltype_col` | `celltype` | Column on the ranger h5ad (or proseg h5ad in legacy mode) that carries per-cell labels. `auto` walks the precedence `celltype > first_type > primary_cell_type > celltype_updated`. Missing / all-NaN → `unlabeled` fallback. |
 | `--id-col` / `celltype.id_col` | `auto` | Force a specific xenium-side id column. `__index__` reads from `.obs.index`. |
 | `--nn-k` / `celltype.nn_k` | `1` | Neighbours per query in the proseg → xenium NN mapping. |
 | `celltype.nuclei_inherit_classification` | `true` | Unlabelled nuclei inherit their sibling cell's label. |

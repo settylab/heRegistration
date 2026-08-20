@@ -882,3 +882,132 @@ class TestBothPromotionPaths:
         assert (he_root / "output" / "warp").is_symlink()
         # summary.html was NOT written (the exploding mock intercepted).
         assert not (he_root / "output" / "summary.html").exists()
+
+
+# ---------------------------------------------------------------------
+# Partial-stage promotion (Tracy `5352008910` Ask 3): register+warp
+# alone must still generate output/ symlinks + summary.html; the viz
+# section shows "viz stage was not run in this invocation" (Ask 3a).
+# ---------------------------------------------------------------------
+class TestPartialStagePromotion:
+    def test_promote_register_warp_only_generates_summary_html(
+        self, tmp_path: Path,
+    ):
+        # Fresh he_root with ONLY register + warp seeded (no celltyped,
+        # no viz). Promote hook runs `--stages register warp` and must
+        # populate output/register + output/warp + write summary.html
+        # with the viz-not-run placeholder for the overlay section.
+        he_root = tmp_path / "he_registration"
+        (he_root / "output").mkdir(parents=True)
+        _seed_stage(
+            he_root, "register", "job_new",
+            manifest_extra={"params": {"mode": "rigid_only"}},
+            artifact_files=["data/_registrar.pickle"],
+        )
+        _seed_stage(
+            he_root, "warp", "job_new",
+            manifest_extra={
+                "params": {"targets": ["cells", "nuclei"], "use_dask": True,
+                           "save_geojson": True},
+                "source_register_run_id": "job_new",
+            },
+            artifact_files=["he_cell_seg.parquet", "he_nucleus_seg.parquet"],
+        )
+        from hexenium import pipeline
+        from hexenium.layout import RunLayout
+        layout = RunLayout(
+            sample_id="S1", he_job_id="job_new", output_root_he=he_root,
+            integrated=False, stages_suffix="",
+        )
+        pipeline._promote_completed_run(
+            layout=layout, cfg={"set_default_on_success": True},
+            stages_ran=["register", "warp"],
+            source_register_run_id="job_new",
+        )
+        # output/ symlinks written for the two promoted stages.
+        assert (he_root / "output" / "register").is_symlink()
+        assert (he_root / "output" / "warp").is_symlink()
+        # output/celltyped and output/viz stay UNSET — un-run stages
+        # never get promoted.
+        assert not (he_root / "output" / "celltyped").exists()
+        assert not (he_root / "output" / "viz").exists()
+        # summary.html landed even though half the stages weren't run.
+        summary = he_root / "output" / "summary.html"
+        assert summary.exists()
+
+    def test_summary_html_viz_not_run_wording(self, tmp_path: Path):
+        # Ask 3a: the placeholder in the Overlay section reads "viz
+        # stage was not run in this invocation" (Tracy's exact
+        # wording). Locks the wording so a future style rewrite
+        # doesn't accidentally rephrase it.
+        he_root = tmp_path / "he_registration"
+        (he_root / "output").mkdir(parents=True)
+        _seed_stage(
+            he_root, "register", "job_new",
+            manifest_extra={"params": {"mode": "rigid_only"}},
+            artifact_files=["data/_registrar.pickle"],
+        )
+        _seed_stage(
+            he_root, "warp", "job_new",
+            manifest_extra={
+                "params": {"targets": ["cells"], "use_dask": True,
+                           "save_geojson": True},
+                "source_register_run_id": "job_new",
+            },
+            artifact_files=["he_cell_seg.parquet", "he_nucleus_seg.parquet"],
+        )
+        from hexenium import pipeline
+        from hexenium.layout import RunLayout
+        layout = RunLayout(
+            sample_id="S1", he_job_id="job_new", output_root_he=he_root,
+            integrated=False, stages_suffix="",
+        )
+        pipeline._promote_completed_run(
+            layout=layout, cfg={"set_default_on_success": True},
+            stages_ran=["register", "warp"],
+            source_register_run_id="job_new",
+        )
+        summary = he_root / "output" / "summary.html"
+        content = summary.read_text()
+        assert "viz stage was not run in this invocation" in content
+        # The historic "viz not promoted" wording must not leak back.
+        assert "viz not promoted" not in content
+
+    def test_summary_html_shows_registration_params_on_partial_promote(
+        self, tmp_path: Path,
+    ):
+        # Partial promote still surfaces the Registration parameters
+        # section (from the register manifest). Locks the fact that
+        # the params section doesn't hard-require a full 4-stage set.
+        he_root = tmp_path / "he_registration"
+        (he_root / "output").mkdir(parents=True)
+        _seed_stage(
+            he_root, "register", "job_new",
+            manifest_extra={"params": {"mode": "full_with_micro",
+                                       "use_he_deconvolution": True}},
+            artifact_files=["data/_registrar.pickle"],
+        )
+        _seed_stage(
+            he_root, "warp", "job_new",
+            manifest_extra={
+                "params": {"targets": ["cells"], "use_dask": True,
+                           "save_geojson": True},
+                "source_register_run_id": "job_new",
+            },
+            artifact_files=["he_cell_seg.parquet", "he_nucleus_seg.parquet"],
+        )
+        from hexenium import pipeline
+        from hexenium.layout import RunLayout
+        layout = RunLayout(
+            sample_id="S1", he_job_id="job_new", output_root_he=he_root,
+            integrated=False, stages_suffix="",
+        )
+        pipeline._promote_completed_run(
+            layout=layout, cfg={"set_default_on_success": True},
+            stages_ran=["register", "warp"],
+            source_register_run_id="job_new",
+        )
+        content = (he_root / "output" / "summary.html").read_text()
+        assert "<h2>Registration parameters</h2>" in content
+        assert "full_with_micro" in content
+        assert "<h2>Warp parameters</h2>" in content

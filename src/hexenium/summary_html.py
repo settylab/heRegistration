@@ -675,7 +675,9 @@ def _render_thumbnails(*, sample_id: str, stages: list[_StageInfo]) -> str:
     stage_by_name = {s.stage: s for s in stages}
     v = stage_by_name.get("viz")
     if v is None or v.he_job_id is None or v.stage_dir is None:
-        return "<p class='none'>viz not promoted &mdash; no overlay to show.</p>"
+        return (
+            "<p class='none'>viz stage was not run in this invocation.</p>"
+        )
     overlay_path = v.stage_dir / f"{sample_id}_overlay.png"
     if not overlay_path.exists():
         return (
