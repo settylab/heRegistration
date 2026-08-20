@@ -237,9 +237,47 @@ echo "[vsi2ometiff] raw2ometiff done in $(( $(date +%s) - t0 ))s"
 echo "[vsi2ometiff] per-series OME-TIFF files:"
 ls -lh "${OMETIFF_STEM%.ome.tif}"_s*.ome.tiff 2>/dev/null || true
 
+# ---- Canonical output: symlink <sample>_he.ome.tif → full-res series ---
+# The pipeline (submit_he_registration.sh's auto-VSI path AND
+# hexenium.stages.he_preprocess.discover_existing_ometiff) expects the
+# converted file at a stable name — the actual full-res image lives in
+# one of the s<N>.ome.tiff files (usually s2 for Olympus 40x, but not
+# guaranteed). Auto-detect by picking the largest-on-disk per-series
+# file (a robust proxy for pixel count). --series <N> override wins.
+if [[ -n "$SERIES" ]]; then
+    PICK="${OMETIFF_STEM%.ome.tif}_s${SERIES}.ome.tiff"
+    if [[ ! -f "$PICK" ]]; then
+        echo "[vsi2ometiff] ERROR: --series $SERIES asked for $PICK" >&2
+        echo "[vsi2ometiff]        but that file wasn't produced." >&2
+        exit 1
+    fi
+    echo "[vsi2ometiff] --series $SERIES override → $PICK"
+else
+    # `ls -S` sorts by size descending.
+    PICK=$(ls -S -1 "${OMETIFF_STEM%.ome.tif}"_s*.ome.tiff 2>/dev/null | head -1)
+    if [[ -z "$PICK" ]]; then
+        echo "[vsi2ometiff] ERROR: no per-series files produced." >&2
+        exit 1
+    fi
+    echo "[vsi2ometiff] auto-detected full-res series (largest on disk):"
+    echo "[vsi2ometiff]   $PICK ($(du -h "$PICK" | cut -f1))"
+fi
+# Relative symlink so the canonical path stays valid on move.
+ln -sfT "$(basename "$PICK")" "$OMETIFF_STEM"
+echo "[vsi2ometiff] canonical link: $OMETIFF_STEM -> $(readlink "$OMETIFF_STEM")"
+
+# All series with the picked one starred — recorded in the log so a
+# later triage can grep it without re-inspecting the OME-TIFF.
 echo ""
-echo "[vsi2ometiff] NEXT: sanity-check which series is the full 40x brightfield:"
-echo "  python -c \"import tifffile; [print(f's{i}:', tifffile.TiffFile(f'${OMETIFF_STEM%.ome.tif}_s{i}.ome.tiff').series[0].shape) for i in range(4)]\""
-echo "  Olympus VSI usually puts the 40x in s2. Feed that file to submit_hexenium_from_ometiff.sh."
+echo "[vsi2ometiff] series metadata (* = picked):"
+python -c "
+import tifffile, glob, os
+canonical = os.path.realpath('$OMETIFF_STEM')
+for p in sorted(glob.glob('${OMETIFF_STEM%.ome.tif}_s*.ome.tiff')):
+    with tifffile.TiffFile(p) as t:
+        s = t.series[0]
+    mark = '  *' if os.path.realpath(p) == canonical else '   '
+    print(f'{mark} {os.path.basename(p)}: {s.shape} name={s.name!r}')
+" 2>&1 || echo "[vsi2ometiff]   (tifffile unavailable; skipping metadata dump)"
 
 echo "[vsi2ometiff] DONE at $(date)"

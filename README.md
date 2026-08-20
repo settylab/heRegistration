@@ -711,17 +711,43 @@ non-rigid + micro solve at `max_non_rigid_registration_dim_px = 10000`
 plus the Dask warp cluster; drop to 128 GB only if you also drop that
 cap.
 
-### Path B — pre-convert a VSI to OME-TIFF (BioFormats path)
+### VSI inputs: automatic BioFormats conversion (unified)
 
-`he_preprocess` uses OpenSlide's Olympus VSI reader, which doesn't
-cover every VSI subtype. Files where
-`openslide.OpenSlide(<vsi>)` raises `OpenSlideUnsupportedFormatError`
-(or `detect_vendor(...)` returns `None`) need to be converted with
-BioFormats-backed tools instead. **Path B is the two-step
-sbatch workflow for that case** — convert once, run hexenium
-against the OME-TIFF as many times as you like:
+Since v0.2.0, `submit_he_registration.sh` handles VSI inputs
+end-to-end without any extra flags. Pass `--he-slide /path/to/foo.vsi`
+and the launcher:
 
-**Step 1 — one-time tool install** (per env):
+1. Detects the `.vsi` extension.
+2. Submits a `bioformats2raw` + `raw2ometiff` conversion job to
+   Slurm as its own record.
+3. Rewrites `--he-slide` internally to the converted OME-TIFF at
+   `<run_dir>/he_registration/converted/<sample>_he.ome.tif`
+   (the same canonical location
+   `hexenium.stages.he_preprocess.discover_existing_ometiff`
+   already checks for).
+4. Submits the hexenium job with
+   `--dependency=afterok:<conv_jobid>` so it runs only when the
+   conversion finishes cleanly.
+
+Both jobs are independent slurm records — a hexenium rerun
+(different `--mode`, `--warp-run-id`, etc.) reuses the
+converted OME-TIFF without redoing the ~15-25-min BioFormats
+step, and each job's `slurm-<jobid>.out/err` lives at a stable
+log path.
+
+**Idempotency**. The converted file is reused on subsequent
+invocations unless you pass `--force-preprocess` (analogous to
+`--force-rerun` for the hexenium stages themselves).
+
+**Series auto-detect**. Olympus VSI files typically carry 4
+series (label / overview / 40x brightfield / macro thumbnail).
+The launcher auto-picks the largest-on-disk series after
+`raw2ometiff --split` — a robust proxy for pixel count that
+avoids the s2-is-always-the-40x assumption. Override with
+`--vsi-series <N>` if the auto-pick ever gets it wrong for
+your data.
+
+**Prerequisites** — install once per env:
 
 ```bash
 micromamba activate heRegistration
@@ -729,8 +755,8 @@ mamba install -c conda-forge bioformats2raw raw2ometiff c-blosc -y
 ```
 
 If conda-forge is unreachable, drop the Glencoe Software zips
-into a scratch dir and export `BFTOOLS_ROOT` + `LIBBLOSC_DIR`
-(the sbatch scripts pick them up automatically):
+in a scratch dir and export `BFTOOLS_ROOT` + `LIBBLOSC_DIR`
+(the launcher picks them up automatically):
 
 ```bash
 TOOL=/path/to/scratch/bftools; mkdir -p $TOOL && cd $TOOL
@@ -741,67 +767,91 @@ export BFTOOLS_ROOT=$TOOL
 export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
 ```
 
-**Step 2 — convert VSI → OME-TIFF (`scripts/submit_vsi_to_ometiff.sh`)**:
+**Example** — a VSI-input invocation looks identical to any
+other input, just with a `.vsi` path:
+
+```bash
+./scripts/submit_he_registration.sh \
+    --sample-id     SAMPLE1 \
+    --run-id        demo_v1 \
+    --output-root   /data/xenium_runs \
+    --he-slide      /data/SAMPLE1/HE/SAMPLE1.vsi \
+    --xenium-bundle /data/SAMPLE1/xenium/output-XETG.../ \
+    --dapi-path     /data/SAMPLE1/xenium/output-XETG.../morphology_focus/morphology_focus_0000.ome.tif
+```
+
+Output:
+```
+[submit] VSI input detected — submitting conversion job:
+Submitted batch job 12344 (conversion)
+Submitted batch job 12345 (logs: SAMPLE1_12345_all)
+  waiting on conversion job 12344 (afterok)
+```
+
+On a rerun with the same `--run-id`, the launcher notices the
+canonical OME-TIFF is already present and prints
+`[submit] skipping VSI conversion` — only the hexenium job is
+submitted, no `--dependency` wait, starts immediately.
+
+### Path B — standalone conversion (advanced / debug)
+
+Two auxiliary launchers cover cases where you want to run just
+ONE of the two steps in isolation from the unified flow above:
+
+- `scripts/submit_vsi_to_ometiff.sh` — VSI → OME-TIFF only. Use
+  when you want to prime a shared cache of converted files
+  outside a specific `--run-id`, or debug conversion parameters
+  (`--vsi-series`, `--max-workers`) in isolation from
+  hexenium.
+- `scripts/submit_hexenium_from_ometiff.sh` — hexenium against
+  an already-converted OME-TIFF, no auto-VSI logic. Use when
+  you have an OME-TIFF from a different producer (Trident /
+  QuPath / bfconvert) at a non-canonical path.
+
+Both are unchanged from the shape they landed in at commit
+`8840bec`; the new unified `submit_he_registration.sh`
+supersedes them for the 90 %+ common case.
+
+**Prerequisites**: same as the unified path above (per-env
+install of `bioformats2raw` + `raw2ometiff` + `c-blosc`, OR
+`BFTOOLS_ROOT` + `LIBBLOSC_DIR` fallback).
+
+**Example — step-1 only** (prime a shared cache):
 
 ```bash
 ./scripts/submit_vsi_to_ometiff.sh \
     --vsi         /path/to/SAMPLE.vsi \
     --out-dir     /path/to/converted \
     --sample-id   SAMPLE \
-    [--env-name   heRegistration]     # default; override for -v3/etc.
+    [--env-name   heRegistration] \
+    [--series     N]
 ```
 
 Prints `Submitted batch job <jobid>` and routes logs to
-`<out-dir>/logs/SAMPLE_vsi2ometiff_<jobid>.{out,err}`. Wall-clock is
-~15-25 min for a ~3 GB Olympus WSI on a `campus-new` node.
+`<out-dir>/logs/SAMPLE_vsi2ometiff_<jobid>.{out,err}`. Wall-clock
+is ~15-25 min for a ~3 GB Olympus WSI on `campus-new`. Output
+includes per-series `<sample>_he_s<N>.ome.tiff` files AND a
+canonical `<sample>_he.ome.tif` symlink pointing at the
+auto-selected (or user-specified) full-res series.
 
-The script uses `raw2ometiff --split`, so per-series OME-TIFF files
-land at `<out-dir>/SAMPLE_he_s<N>.ome.tiff`. For Olympus 40x
-brightfield scans, `s2` is almost always the full-resolution image
-(the other series are label / overview / macro thumbnail). Verify
-with:
-
-```bash
-python -c "
-import tifffile
-for i in range(4):
-    with tifffile.TiffFile(f'/path/to/converted/SAMPLE_he_s{i}.ome.tiff') as t:
-        print(f's{i}: {t.series[0].shape} name={t.series[0].name!r}')
-"
-# pick the series whose shape matches your 40x scan (tens of
-# thousands of pixels per dim).
-```
-
-**Step 3 — run hexenium on the OME-TIFF (`scripts/submit_hexenium_from_ometiff.sh`)**:
+**Example — step-2 only** (hexenium against an existing OME-TIFF):
 
 ```bash
 ./scripts/submit_hexenium_from_ometiff.sh \
-    --he-ometiff       /path/to/converted/SAMPLE_he_s2.ome.tiff \
+    --he-ometiff       /path/to/converted/SAMPLE_he.ome.tif \
     --sample-id        SAMPLE \
     --run-id           demo_v1 \
     --output-root      /data/xenium_runs \
     --xenium-bundle    /data/SAMPLE/xenium/output-XETG.../ \
     --dapi-path        /data/SAMPLE/xenium/output-XETG.../morphology_focus/morphology_focus_0000.ome.tif \
-    --proseg-purified-h5ad /data/SAMPLE/spatial_adata/SAMPLE_proseg_purified.h5ad \
     [--env-name        heRegistration] \
-    [--stages          register warp celltype viz]     # default; omit `he_preprocess`
+    [--stages          register warp celltype viz]
 ```
 
-Under the hood this is a thin dispatcher to
-`submit_he_registration.sh` with `--he-slide <path>` and
-`--stages register warp celltype viz` (skipping `he_preprocess`,
-since the OME-TIFF is already converted). Any other hexenium
-flag you pass — `--mode`, `--warp-run-id`, `--celltype-col`,
-`--set-default-on-success`, `--force-rerun`, … — is forwarded
+Thin dispatcher to `submit_he_registration.sh` — accepts every
+hexenium flag (`--mode`, `--warp-run-id`, `--celltype-col`,
+`--set-default-on-success`, `--force-rerun`, ...) and forwards
 untouched.
-
-**Reruns and debugging.** Both scripts are independent:
-
-- Rerun step 2 (conversion) freely — it wipes and rebuilds the
-  zarr; the output OME-TIFFs are idempotent.
-- Rerun step 3 (hexenium) against the same OME-TIFF as often as
-  you like, tweaking `--mode`, `--warp-run-id`, etc. between
-  runs; the conversion doesn't need to be redone.
 
 ## Development & testing
 
