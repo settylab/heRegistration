@@ -77,7 +77,15 @@ Issues = "https://github.com/settylab/xenium-he-registration/issues"
 Repository = "https://github.com/settylab/xenium-he-registration"
 
 [tool.setuptools.package-data]
-hexenium = ["../../config/default.yaml"]
+# Ship the default config INSIDE the package so it resolves via
+# importlib.resources for both editable AND non-editable installs.
+# The historic ``hexenium = ["../../config/default.yaml"]`` pattern
+# was invalid setuptools syntax (relative paths with ``..`` are not
+# supported) — the wheel silently omitted the file, and `pip install .`
+# from a clone would fail at first `hexenium run` on a
+# FileNotFoundError. Cross-user report at
+# ``settylab/TracyY123-nexus#15`` comment ``5360185231``.
+"hexenium._defaults" = ["*.yaml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
