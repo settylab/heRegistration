@@ -312,6 +312,77 @@ just as reliably.
   stock opencv without `--no-deps`) can still overwrite the
   contrib variant on disk.
 
+- **`ValueError: NoneType copy mode not allowed`** deep in
+  VALIS's rigid-registration step, from
+  `fastcluster.py:linkage`. Root cause: your env's
+  `fastcluster` has drifted UP to 1.3.0 while `numpy` is
+  correctly pinned at `1.26.4`. fastcluster 1.3.0's
+  `linkage()` passes `copy=None` to numpy's `array()` for
+  `method='single'` (the method valis_hest's
+  `serial_rigid.order_Dmat` uses); numpy 2.x treats
+  `copy=None` as "copy if needed", but numpy 1.x rejects it
+  outright. Full diagnostic:
+  [comment 5361751664](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5361751664).
+
+  **Fix:**
+  ```bash
+  pip install --force-reinstall --no-deps "fastcluster==1.2.6"
+  ```
+
+  Verify:
+  ```bash
+  python -c "import fastcluster; print(fastcluster.__version__)"  # expect 1.2.6
+  python -c "from valis_hest import serial_rigid; print('OK')"    # expect OK
+  ```
+
+  The current `heRegistration-requirements.txt` pins
+  `fastcluster==1.2.6` explicitly (with a comment explaining
+  the numpy-1.x compat requirement), so a clean install
+  from the requirements no longer triggers this — but a
+  `pip install --upgrade fastcluster` or a re-freeze against
+  a numpy-2.x-only wheel can drift the env back into the
+  bug.
+
+### VSI-input prerequisites (optional; for `.vsi` H&E slides)
+
+If your H&E is an Olympus `.vsi` file, hexenium's built-in
+`he_preprocess` stage (OpenSlide-based) will attempt to
+convert it to OME-TIFF. That works for most VSI subtypes, but
+some Olympus slides (verified live on Fred Hutch's
+`metx_liver_met/h_e/*.vsi` — comment 5360705326) aren't
+recognized by libopenslide's Olympus reader and fall out with
+`OpenSlideUnsupportedFormatError`. For those cases,
+`submit_he_registration.sh` automatically dispatches a
+BioFormats-backed conversion job (`bioformats2raw` +
+`raw2ometiff`) before the hexenium job, chained via
+`--dependency=afterok:` (the unified "Path B" flow).
+
+The BioFormats tools install once per env:
+
+```bash
+micromamba activate heRegistration
+mamba install -c conda-forge bioformats2raw raw2ometiff c-blosc -y
+```
+
+If conda-forge is unreachable from your cluster node, drop
+the Glencoe Software binary zips into a scratch dir and set
+two env vars (the sbatch scripts pick them up automatically):
+
+```bash
+TOOL=/path/to/scratch/bftools; mkdir -p $TOOL && cd $TOOL
+curl -L -O https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
+curl -L -O https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
+unzip -q bioformats2raw-0.12.1.zip && unzip -q raw2ometiff-0.9.0.zip
+export BFTOOLS_ROOT=$TOOL
+export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
+```
+
+Full details: README ["HPC usage (Slurm) — VSI inputs:
+automatic BioFormats conversion (unified)"](../README.md#vsi-inputs-automatic-bioformats-conversion-unified).
+
+Skip this section entirely if your H&E is already
+`.ome.tif` / `.ome.tiff` / `.tif`.
+
 ### Verified min-blast-radius state
 
 Tracy validated the following pin set end-to-end on Gizmo

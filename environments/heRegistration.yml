@@ -46,6 +46,14 @@ dependencies:
   # `heRegistration-requirements.txt` as a belt-and-braces guard
   # against a `pip install --force-reinstall <pkg>` re-resolving
   # transitive deps and pulling numpy 2.x.
+  #
+  # Companion pin: `fastcluster==1.2.6` in
+  # `heRegistration-requirements.txt` (NOT 1.3.0). fastcluster
+  # 1.3.0 calls `numpy.array(..., copy=None)` inside `linkage()`
+  # for `method='single'` (the branch valis_hest's rigid
+  # registration hits), which numpy 1.26.4 rejects with
+  # `ValueError: NoneType copy mode not allowed`. Full diagnostic:
+  # settylab/TracyY123-nexus#15 comment 5361751664.
   - python=3.11
   - numpy=1.26.4
   - pandas<3
