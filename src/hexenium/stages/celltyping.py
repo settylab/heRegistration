@@ -571,11 +571,28 @@ def _refilter_gdf(
     polygons all fall below ``area_threshold_px``, small-sample
     runs, and corrupted / partial warp outputs.
 
-    Re-wrapping via ``gpd.GeoDataFrame(...)`` restores the type
-    without changing values. Cheap (empty case is essentially free;
-    non-empty case is a no-op on the already-typed subset since the
-    constructor recognises the geometry column).
+    **Short-circuit on empty subset** (skeptic-suspect follow-up on
+    ``5359956566``): the initial fix rewrapped TYPE but not SCHEMA.
+    When ``subset`` is already empty, ``subset.geometry.apply(fn)``
+    returns a geometry-dtype Series (pandas can't infer bool return
+    dtype from a zero-row input), and using that as a boolean
+    indexer collapses the frame to zero columns. The subsequent
+    ``gpd.GeoDataFrame(zero_col_df, geometry="geometry")`` then
+    raises ``ValueError: Unknown column geometry``. Returning
+    ``subset`` unchanged when it's already empty avoids the whole
+    apply-then-index-then-wrap chain and preserves the invariant
+    (still a GeoDataFrame, still has ``geometry`` column, still
+    zero rows).
+
+    Non-empty subset: rewrap-if-needed via ``gpd.GeoDataFrame(...)``
+    is cheap (constructor is a no-op on the already-typed input).
     """
+    if len(subset) == 0:
+        # Already empty and (by invariant, since this function is
+        # the only writer) already a GeoDataFrame with a geometry
+        # column. Skip the mask filter entirely — evaluating a
+        # boolean mask against zero rows is meaningless anyway.
+        return subset
     filtered = subset[mask].copy()
     if not isinstance(filtered, gpd.GeoDataFrame):
         filtered = gpd.GeoDataFrame(
