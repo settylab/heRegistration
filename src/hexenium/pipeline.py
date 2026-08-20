@@ -378,42 +378,6 @@ def _resolve_existing_registrar(
     return Path(m["registrar_pickle"]), source_id
 
 
-def _maybe_derive_proseg_purified(stages, cfg: dict, layout: RunLayout) -> None:
-    """Auto-derive ``proseg_purified_h5ad`` from the xenium run dir when
-    the user didn't set it explicitly.
-
-    Only fires when celltype is in ``stages`` AND we're in an integrated
-    mode (either --xenium-h5ad or --run-id gives us a xenium_run_dir).
-    Standalone mode has no run_dir; the user must pass the path there.
-    Explicit ``--proseg-purified-h5ad`` always wins (short-circuited before
-    this runs).
-
-    Mutates ``cfg`` in place. Raises ``SystemExit`` with an actionable
-    message if celltype requires proseg but the derived path is missing.
-    """
-    if "celltype" not in stages:
-        return
-    if cfg.get("proseg_purified_h5ad"):
-        return
-    if layout.xenium_run_dir is None:
-        return
-    derived = (layout.xenium_run_dir / "spatial_adata"
-               / f"{layout.sample_id}_proseg_purified.h5ad")
-    if derived.exists():
-        cfg["proseg_purified_h5ad"] = str(derived)
-        log(f"[pipeline] auto-detected proseg_purified h5ad -> {derived}")
-        return
-    raise SystemExit(
-        f"proseg_purified h5ad not found at expected path:\n"
-        f"  {derived}\n"
-        f"the celltype stage requires this file. Either run an upstream "
-        f"proseg-purified export first, or pass --proseg-purified-h5ad "
-        f"<path> to override.\n"
-        f"Identity: sample_id={layout.sample_id!r} "
-        f"xenium_run_dir={layout.xenium_run_dir}."
-    )
-
-
 def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
     """Execute the pipeline. Assumes `cfg` has already been validated."""
     he_job_id = resolve_he_job_id(cfg.get("he_job_id"))
@@ -430,7 +394,15 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
     cfg["sample_id"] = layout.sample_id
     cfg["he_job_id"] = layout.he_job_id
 
-    _maybe_derive_proseg_purified(stages, cfg, layout)
+    # Note: no proseg_purified auto-derive. The prior
+    # ``_maybe_derive_proseg_purified`` helper was removed on the
+    # ``4-changes-impl-fixes-needed-resolution`` pass (settylab/
+    # TracyY123-nexus#15 skeptic F1). Its silent mutation of
+    # ``cfg["proseg_purified_h5ad"]`` was pinning integrated-mode
+    # invocations into the legacy proseg-NN celltype path — making the
+    # new ranger-direct default unreachable through Tracy's typical
+    # cmdline. Legacy proseg-NN is still available: pass
+    # ``--proseg-purified-h5ad <path>`` explicitly.
 
     layout.ensure_dirs()
 

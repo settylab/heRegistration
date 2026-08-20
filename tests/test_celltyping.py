@@ -14,16 +14,20 @@ import pandas as pd
 import pytest
 
 import anndata as ad
+from shapely.geometry import Polygon
 
 from hexenium.stages.celltyping import (
+    UNLABELED,
     _CELLTYPE_COL_CANDIDATES,
     _SPATIAL_COORD_OBS_PAIRS,
     _XENIUM_ID_COL_CANDIDATES,
     _celltype_from_nn,
+    _celltype_from_xenium_ranger_direct,
     _get_xenium_ids,
     _resolve_celltype_col,
     _resolve_spatial_coords,
     _resolve_xenium_id_col,
+    run_celltyping,
 )
 
 
@@ -492,3 +496,260 @@ class TestCelltypeFromNn:
         assert len(annot) == 3
         assert annot.loc[annot["xenium_cell_id"] == "aaaaafep-1", "group"].iloc[0] == "Tumor"
         assert annot.loc[annot["xenium_cell_id"] == "lkkgeihi-1", "group"].iloc[0] == "Fibroblast"
+
+
+def _make_warped_parquet(path: Path, xenium_ids, polygons):
+    """Emit a warp-stage-shaped parquet — mirror of the helper in
+    ``test_pipeline_e2e.py``. Kept local so this module has no
+    cross-file test-fixture import.
+    """
+    from shapely import to_wkb
+    df = pd.DataFrame({
+        "geometry": [to_wkb(p) for p in polygons],
+    })
+    df.index = xenium_ids
+    df.index.name = "__null_dask_index__"
+    df.to_parquet(path)
+
+
+# ---------------------------------------------------------------------
+# Ranger-direct celltype source (Tracy `5352008910` Ask 1).
+#
+# These tests cover the NEW default path introduced on commit
+# ``26e78b0`` and the routing fix from skeptic F1 (commit that lands
+# on top): with just ``--xenium-h5ad``, hexenium reads
+# ``.obs[<celltype_col>]`` directly instead of NN-mapping from
+# proseg_purified. Adds direct test coverage that skeptic F2 flagged
+# as absent from ``test_celltyping.py``.
+# ---------------------------------------------------------------------
+class TestRangerDirect:
+    def _ranger_h5ad(
+        self,
+        tmp_path: Path,
+        celltype_values,
+        celltype_col: str = "celltype",
+        uuids=("aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"),
+    ) -> Path:
+        """Build a xenium_ranger-shaped h5ad with a celltype column."""
+        n = len(uuids)
+        obs = pd.DataFrame(
+            {celltype_col: list(celltype_values)},
+            index=list(uuids),
+        )
+        adata = ad.AnnData(
+            X=np.zeros((n, 2), dtype=np.float32), obs=obs,
+        )
+        adata.obsm["spatial"] = np.array(
+            [[10.0 * i, 10.0 * i] for i in range(n)], dtype=float,
+        )
+        path = tmp_path / "xenium_ranger.h5ad"
+        adata.write_h5ad(path)
+        return path
+
+    def test_ranger_direct_reads_obs_celltype_column(self, tmp_path: Path):
+        # Default source path: three cells labelled by their own
+        # .obs["celltype"] value. No NN — labels come straight off
+        # the query h5ad.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert set(annot["group"]) == {"Tumor", "Fibroblast", "Bcell"}
+        # nn_distance column is present + all-NaN — no NN happened.
+        assert "nn_distance" in annot.columns
+        assert annot["nn_distance"].isna().all()
+        # ids preserved (whitespace-stripped by the helper).
+        assert set(annot["xenium_cell_id"]) == {
+            "aaaaafep-1", "lkkgeihi-1", "knjdobdk-1",
+        }
+
+    def test_ranger_direct_all_nan_column_falls_to_unlabeled(
+        self, tmp_path: Path,
+    ):
+        # Ask 2c: an existing but entirely-NaN celltype column also
+        # falls back to UNLABELED for every row (no crash).
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=[np.nan, np.nan, np.nan],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert (annot["group"] == UNLABELED).all()
+
+    def test_ranger_direct_mixed_nan_falls_to_unlabeled_per_row(
+        self, tmp_path: Path,
+    ):
+        # Companion to Ask 2c: per-row NaN falls to UNLABELED while
+        # non-null rows keep their labels.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", np.nan, "Bcell"],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        groups = dict(zip(annot["xenium_cell_id"], annot["group"]))
+        assert groups["aaaaafep-1"] == "Tumor"
+        assert groups["lkkgeihi-1"] == UNLABELED
+        assert groups["knjdobdk-1"] == "Bcell"
+
+    def test_ranger_direct_missing_column_falls_to_unlabeled(
+        self, tmp_path: Path,
+    ):
+        # Ask 2 headline case: the requested column doesn't exist on
+        # the h5ad → WARN + all rows UNLABELED. Was KeyError.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+            celltype_col="not_the_celltype_col",  # column named differently
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",       # asking for a column that doesn't exist
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert (annot["group"] == UNLABELED).all()
+
+    def test_run_celltyping_routes_to_ranger_direct_when_only_xenium_h5ad(
+        self, tmp_path: Path,
+    ):
+        # The routing test that would have caught skeptic F1.
+        # Given `xenium_h5ad` but NOT `proseg_purified_h5ad`, run_celltyping
+        # must go through _celltype_from_xenium_ranger_direct (no NN).
+        # We monkeypatch both entry points to spy on which fires.
+        from hexenium.stages import celltyping as _ct
+
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        # Minimal warp parquet so run_celltyping doesn't refuse on
+        # missing warp inputs. Reuse the shape from the test helper
+        # at the top of this module (WKB geometry + __null_dask_index__).
+        warp_dir = tmp_path / "warp"; warp_dir.mkdir()
+        _make_warped_parquet(
+            warp_dir / "he_cell_seg.parquet",
+            xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            polygons=[
+                Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
+                Polygon([(2, 2), (3, 2), (3, 3), (2, 3)]),
+                Polygon([(4, 4), (5, 4), (5, 5), (4, 5)]),
+            ],
+        )
+        out_dir = tmp_path / "celltyped"; out_dir.mkdir()
+
+        calls = {"nn": 0, "ranger": 0}
+        real_ranger = _ct._celltype_from_xenium_ranger_direct
+        real_nn = _ct._celltype_from_nn
+
+        def spy_ranger(**kw):
+            calls["ranger"] += 1
+            return real_ranger(**kw)
+        def spy_nn(**kw):
+            calls["nn"] += 1
+            return real_nn(**kw)
+
+        import pytest as _pt
+        monkey = _pt.MonkeyPatch()
+        try:
+            monkey.setattr(_ct, "_celltype_from_xenium_ranger_direct", spy_ranger)
+            monkey.setattr(_ct, "_celltype_from_nn", spy_nn)
+            run_celltyping(
+                sample_id="SAMPLE1",
+                warp_dir=warp_dir,
+                out_dir=out_dir,
+                xenium_h5ad=h5ad_path,
+                proseg_purified_h5ad=None,   # THE routing input
+                celltype_col="celltype",
+                id_col="auto",
+            )
+        finally:
+            monkey.undo()
+
+        assert calls["ranger"] == 1, (
+            "expected _celltype_from_xenium_ranger_direct to fire (new default)"
+        )
+        assert calls["nn"] == 0, (
+            "legacy _celltype_from_nn should NOT fire when "
+            "proseg_purified_h5ad is None (F1 routing fix)"
+        )
+
+    def test_run_celltyping_routes_to_legacy_nn_when_proseg_purified_set(
+        self, tmp_path: Path,
+    ):
+        # Companion to the above: passing --proseg-purified-h5ad
+        # explicitly opts back into the legacy proseg-NN path.
+        from hexenium.stages import celltyping as _ct
+
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        # Minimal proseg h5ad with celltype + centroids so the legacy
+        # NN path can fit + run without erroring.
+        proseg_path = tmp_path / "proseg_purified.h5ad"
+        proseg_obs = pd.DataFrame(
+            {"celltype": ["Tumor", "Fibroblast", "Bcell"],
+             "centroid_x": [0.0, 10.0, 20.0],
+             "centroid_y": [0.0, 10.0, 20.0]},
+            index=["0", "1", "2"],
+        )
+        ad.AnnData(
+            X=np.zeros((3, 2), dtype=np.float32), obs=proseg_obs,
+        ).write_h5ad(proseg_path)
+
+        warp_dir = tmp_path / "warp"; warp_dir.mkdir()
+        _make_warped_parquet(
+            warp_dir / "he_cell_seg.parquet",
+            xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            polygons=[
+                Polygon([(0, 0), (1, 0), (1, 1), (0, 1)]),
+                Polygon([(2, 2), (3, 2), (3, 3), (2, 3)]),
+                Polygon([(4, 4), (5, 4), (5, 5), (4, 5)]),
+            ],
+        )
+        out_dir = tmp_path / "celltyped"; out_dir.mkdir()
+
+        calls = {"nn": 0, "ranger": 0}
+        real_ranger = _ct._celltype_from_xenium_ranger_direct
+        real_nn = _ct._celltype_from_nn
+
+        def spy_ranger(**kw):
+            calls["ranger"] += 1
+            return real_ranger(**kw)
+        def spy_nn(**kw):
+            calls["nn"] += 1
+            return real_nn(**kw)
+
+        import pytest as _pt
+        monkey = _pt.MonkeyPatch()
+        try:
+            monkey.setattr(_ct, "_celltype_from_xenium_ranger_direct", spy_ranger)
+            monkey.setattr(_ct, "_celltype_from_nn", spy_nn)
+            run_celltyping(
+                sample_id="SAMPLE1",
+                warp_dir=warp_dir,
+                out_dir=out_dir,
+                xenium_h5ad=h5ad_path,
+                proseg_purified_h5ad=proseg_path,   # explicit legacy opt-in
+                celltype_col="auto",
+                id_col="auto",
+            )
+        finally:
+            monkey.undo()
+
+        assert calls["nn"] == 1, (
+            "legacy _celltype_from_nn should fire when "
+            "proseg_purified_h5ad is set explicitly"
+        )
+        assert calls["ranger"] == 0, (
+            "ranger-direct path should NOT fire when the legacy proseg-NN "
+            "was explicitly opted into via --proseg-purified-h5ad"
+        )

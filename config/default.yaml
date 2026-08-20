@@ -127,15 +127,35 @@ warp:
     jvm_mem_gb: 1
 
 # ----- Cell-type annotation ----------------------------------------
-# Source of celltype is the upstream proseg_purified.h5ad (fitted on
-# its centroids + celltype .obs column); query is xenium_h5ad. Every
-# xenium cell is labelled — no mark_unassigned policy.
+# Default source: read celltype labels DIRECTLY from
+# ``xenium_ranger.h5ad``'s ``.obs[<celltype_col>]``. Post
+# xenium-preprocess's ``rctd-split celltype_writeback`` stage (default
+# column ``celltype`` per ``packages/rctd-split/config/default.yaml:172``),
+# the ranger h5ad already carries the labels — no NN fit needed, and
+# the H&E overlay uses THE SAME labels the upstream summary reports use
+# (zero drift risk).
+#
+# Legacy proseg-NN source: pass ``--proseg-purified-h5ad <path>``
+# explicitly to switch to the original nearest-neighbour mapping
+# from ``proseg_purified.h5ad``'s centroids + celltype column onto
+# every xenium cell. Kept for standalone-mode users who don't run
+# xenium-preprocess's rctd-split, or for a fresh NN fit against a
+# custom proseg reference. The pipeline no longer AUTO-derives the
+# proseg path from the run dir (removed on skeptic F1) — the CLI
+# flag is now a real opt-in signal.
+#
+# Missing / all-NaN celltype column on the chosen source h5ad falls
+# gracefully to the ``unlabeled`` sentinel (viz palette maps this
+# to grey #888888). No KeyError.
 celltype:
   # Path override for the query xenium h5ad. Falls back to the
   # top-level `xenium_h5ad:` key (integrated mode) if null.
   xenium_h5ad: null
-  # Path override for the source proseg_purified h5ad. Falls back to
-  # the top-level `proseg_purified_h5ad:` key if null.
+  # Path override for the LEGACY proseg-NN source. Falls back to the
+  # top-level `proseg_purified_h5ad:` key if null. Explicit override
+  # (either here or via `--proseg-purified-h5ad`) is the only signal
+  # that opts into the legacy NN path; standard ranger-direct default
+  # requires this to stay unset.
   proseg_purified_h5ad: null
   # Column on the source h5ad that carries per-cell celltype labels.
   # Default `celltype` matches xenium-preprocess's rctd-split

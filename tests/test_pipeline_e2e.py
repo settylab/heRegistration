@@ -258,10 +258,25 @@ class TestIntegratedMode:
         assert layout2.logs_dir != layout.logs_dir
 
 
-class TestProsegPurifiedAutoDerive:
-    """Auto-derive of --proseg-purified-h5ad from the xenium run dir
-    (). Mirrors the xenium h5ad
-    auto-derive from --run-id already in place."""
+class TestProsegPurifiedNoAutoDerive:
+    """The prior ``_maybe_derive_proseg_purified`` helper was REMOVED
+    on ``settylab/TracyY123-nexus#15`` skeptic F1 —  it was silently
+    pinning integrated-mode invocations into the legacy proseg-NN
+    celltype path, making the new ranger-direct default (which the
+    ``4-changes-impl`` commits introduced) unreachable through
+    Tracy's typical cmdline.
+
+    These tests lock in the NEW routing:
+
+    * The helper is gone — import guard on ``hexenium.pipeline``.
+    * A pipeline invocation on an integrated-mode layout does NOT
+      mutate ``cfg["proseg_purified_h5ad"]`` even if the file exists
+      at the old auto-derive location → celltype stage receives
+      ``proseg_purified_h5ad`` = None → routes to
+      ``_celltype_from_xenium_ranger_direct`` (the new default).
+    * Explicit ``--proseg-purified-h5ad <path>`` still lands intact,
+      keeping the legacy NN path opt-in.
+    """
 
     def _run_id_layout(self, tmp_path, sample_id="SAMPLE1", run_id="demo_v1"):
         return resolve_layout(
@@ -272,76 +287,71 @@ class TestProsegPurifiedAutoDerive:
             run_id=run_id,
         )
 
-    def test_derives_from_run_dir_when_file_exists(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        layout = self._run_id_layout(tmp_path)
-        target = (layout.xenium_run_dir / "spatial_adata"
-                  / f"{layout.sample_id}_proseg_purified.h5ad")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("")  # existence-only; not read here
-        cfg: dict = {}
-        _maybe_derive_proseg_purified(["celltype"], cfg, layout)
-        assert cfg["proseg_purified_h5ad"] == str(target)
-
-    def test_fails_loud_when_derived_missing(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        layout = self._run_id_layout(tmp_path)
-        cfg: dict = {}
-        with pytest.raises(SystemExit, match="proseg_purified h5ad not found"):
-            _maybe_derive_proseg_purified(["celltype"], cfg, layout)
-
-    def test_noop_when_celltype_not_in_stages(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        layout = self._run_id_layout(tmp_path)
-        cfg: dict = {}
-        # No file, no celltype stage → do nothing, no raise.
-        _maybe_derive_proseg_purified(["register", "warp"], cfg, layout)
-        assert "proseg_purified_h5ad" not in cfg
-
-    def test_explicit_override_wins(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        layout = self._run_id_layout(tmp_path)
-        cfg: dict = {"proseg_purified_h5ad": "/explicit/path.h5ad"}
-        # No file at derived path, but explicit wins → no raise, no change.
-        _maybe_derive_proseg_purified(["celltype"], cfg, layout)
-        assert cfg["proseg_purified_h5ad"] == "/explicit/path.h5ad"
-
-    def test_noop_in_standalone_mode_no_run_dir(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        # Standalone: no --run-id → xenium_run_dir is None.
-        layout = resolve_layout(
-            sample_id="SAMPLE1",
-            output_root=tmp_path,
-            xenium_h5ad=None,
-            he_job_id="he-1",
+    def test_helper_is_removed(self):
+        # Import-time regression guard: a future refactor accidentally
+        # re-introducing ``_maybe_derive_proseg_purified`` would trip
+        # this. The helper's removal IS the whole F1 fix.
+        import hexenium.pipeline as _pl
+        assert not hasattr(_pl, "_maybe_derive_proseg_purified"), (
+            "hexenium.pipeline._maybe_derive_proseg_purified was "
+            "deliberately removed on skeptic F1. Do not re-add — its "
+            "silent cfg mutation pinned integrated-mode invocations "
+            "into the legacy proseg-NN celltype path, blocking the new "
+            "ranger-direct default from ever running via Tracy's "
+            "typical cmdline."
         )
-        assert layout.xenium_run_dir is None
-        cfg: dict = {}
-        # No derive possible; must not raise (falls through to whatever
-        # the celltype stage does when proseg is None — today that's
-        # skip the NN mapping; not this function's concern).
-        _maybe_derive_proseg_purified(["celltype"], cfg, layout)
-        assert "proseg_purified_h5ad" not in cfg
 
-    def test_integrated_by_h5ad_derives_via_run_dir(self, tmp_path):
-        from hexenium.pipeline import _maybe_derive_proseg_purified
-        sample_id, run_id = "SAMPLE1", "run42"
-        run_dir = tmp_path / sample_id / f"{sample_id}_{run_id}"
-        xenium_h5ad = _make_integrated_xenium(
-            run_dir / "spatial_adata" / f"{sample_id}_xenium_ranger.h5ad",
-            centroids=[(5.0, 5.0)],
-            uuids=["aaaaafep-1"],
-            sample_id=sample_id, run_id=run_id,
+    def test_pipeline_run_does_not_populate_proseg_purified_from_disk(
+        self, tmp_path,
+    ):
+        # A file EXISTS on disk at the OLD auto-derive location. The
+        # pipeline must NOT mutate cfg to pick it up.
+        from hexenium import pipeline
+        from hexenium.config import deep_update, load_default
+
+        layout = self._run_id_layout(tmp_path)
+        derived_path = (layout.xenium_run_dir / "spatial_adata"
+                        / f"{layout.sample_id}_proseg_purified.h5ad")
+        derived_path.parent.mkdir(parents=True, exist_ok=True)
+        derived_path.write_text("")  # existence-only
+
+        he_path = tmp_path / "he.ome.tif"; he_path.touch()
+        bundle = tmp_path / "output-XETG"; bundle.mkdir()
+        cfg = deep_update(load_default(), {
+            "sample_id": "SAMPLE1",
+            "run_id": "demo_v1",
+            "output_root": str(tmp_path),
+            "he_path": str(he_path),
+            "xenium_bundle": str(bundle),
+        })
+        pipeline.run(cfg, stages=[], argv=["hexenium", "run"])
+        assert "proseg_purified_h5ad" not in cfg or not cfg["proseg_purified_h5ad"], (
+            "cfg should NOT have been auto-mutated to include the "
+            "proseg path (F1 fix — the helper is gone). Got "
+            f"cfg['proseg_purified_h5ad']={cfg.get('proseg_purified_h5ad')!r}"
         )
-        target = (run_dir / "spatial_adata"
-                  / f"{sample_id}_proseg_purified.h5ad")
-        target.write_text("")
-        layout = resolve_layout(
-            sample_id=None,
-            output_root=None,
-            xenium_h5ad=xenium_h5ad,
-            he_job_id="he-42",
-        )
-        cfg: dict = {}
-        _maybe_derive_proseg_purified(["celltype", "viz"], cfg, layout)
-        assert cfg["proseg_purified_h5ad"] == str(target.resolve())
+
+    def test_explicit_proseg_purified_still_passes_through(
+        self, tmp_path,
+    ):
+        # When the user explicitly sets --proseg-purified-h5ad, that
+        # value survives into the celltype stage's routing (legacy
+        # proseg-NN path is preserved).
+        from hexenium import pipeline
+        from hexenium.config import deep_update, load_default
+
+        explicit_path = tmp_path / "explicit_proseg.h5ad"
+        explicit_path.write_text("")
+
+        he_path = tmp_path / "he.ome.tif"; he_path.touch()
+        bundle = tmp_path / "output-XETG"; bundle.mkdir()
+        cfg = deep_update(load_default(), {
+            "sample_id": "SAMPLE1",
+            "run_id": "demo_v1",
+            "output_root": str(tmp_path),
+            "he_path": str(he_path),
+            "xenium_bundle": str(bundle),
+            "proseg_purified_h5ad": str(explicit_path),
+        })
+        pipeline.run(cfg, stages=[], argv=["hexenium", "run"])
+        assert cfg["proseg_purified_h5ad"] == str(explicit_path)
