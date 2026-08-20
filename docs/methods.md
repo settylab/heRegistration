@@ -6,13 +6,14 @@ their peer-reviewed papers, not GitHub URLs.
 
 ## Overview
 
-hexenium (`v0.1.0`) is a Python package that registers a hematoxylin
-and eosin (H&E) whole-slide image against the DAPI morphology channel
+hexenium is a Python package that registers a hematoxylin and
+eosin (H&E) whole-slide image against the DAPI morphology channel
 of a matched Xenium in-situ transcriptomics run, warps the Xenium
-cell + nucleus segmentations into H&E pixel space, joins them to an
-external cell-type annotation table, and emits per-slide overlay
-visualisations. Every stage is idempotent (sentinel-file resume);
-every run snapshots its resolved parameters to disk for traceability.
+cell + nucleus segmentations into H&E pixel space, joins them to
+an external cell-type annotation table, and emits per-slide
+overlay visualisations. Every stage is idempotent (sentinel-file
+resume); every run snapshots its resolved parameters to disk for
+traceability.
 
 ## 0. VSI pre-conversion (`he_preprocess`)
 

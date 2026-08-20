@@ -175,20 +175,19 @@ for column-resolution precedence and the full set of knobs.
 
 ## Stage details
 
+The subsections below cover user-facing behavior per stage.
+For algorithm details and library-level implementation
+(OpenSlide / tifffile writer settings, Dask worker + JVM
+lifecycle, Shapely polygon cleanup, palette assignment),
+see [`docs/methods.md`](docs/methods.md).
+
 ### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
 
 If `--he-slide` points to an Olympus SlideScanner `.vsi`,
-this stage converts it to a pyramidal OME-TIFF that matches
-10x's Xenium Explorer image-conversion specification:
-1024×1024 tiles, lossless JPEG 2000 (or ZLIB), 7-level
-pyramid at scale 2.
-
-`OpenSlide` reads the source. `tifffile.TiffWriter` writes
-the pyramid. Physical pixel size is propagated from
-OpenSlide's `mpp-{x,y}` into the OME-TIFF's
-`PhysicalSize{X,Y}` metadata. If the input is already an
-OME-TIFF, the stage returns immediately and downstream
-stages consume the input as-is.
+this stage converts it to a pyramidal OME-TIFF matching
+10x's Xenium Explorer specification. If the input is
+already an OME-TIFF, the stage returns immediately and
+downstream stages consume the input as-is.
 
 The converted OME-TIFF is written **next to the source VSI**
 as `<vsi_dir>/<vsi_stem>.ome.tif` when that directory is
@@ -238,17 +237,13 @@ sibling `rigid_registration/`, `non_rigid_registration/`,
 ### `warp` — apply the registrar to Xenium objects
 
 Applies the VALIS registrar to the Xenium
-`cell_boundaries.parquet` and `nucleus_boundaries.parquet` (and,
-optionally, `transcripts.parquet`) via HEST's
+`cell_boundaries.parquet` and `nucleus_boundaries.parquet`
+(and, optionally, `transcripts.parquet`) via HEST's
 `warp_and_save_xenium_objects`.
 
-Warping runs on a Dask `LocalCluster`. Every worker initialises
-the BioFormats JVM exactly once via a `WorkerPlugin`. JPype
-enforces a single JVM lifecycle per Python process, so the JVM
-is deliberately not torn down after registration.
-
-Outputs are WKB-encoded GeoPandas parquets in H&E pixel space.
-Each row's Xenium `cell_id` is preserved for downstream joins.
+Outputs are WKB-encoded GeoPandas parquets in H&E pixel
+space. Each row's Xenium `cell_id` is preserved for
+downstream joins.
 
 **Writes:** `warp/<he_job_id>/he_cell_seg.{parquet,geojson}` and
 `warp/<he_job_id>/he_nucleus_seg.{parquet,geojson}` (and
@@ -310,14 +305,10 @@ Auto-detection knobs:
   `.obs['x_centroid'/'y_centroid']`, `.obs['x'/'y']`. Override with
   `celltype.{proseg,xenium}_{x,y}_col` in the config YAML.
 
-The label is joined onto the warped boundaries via a
-cumcount-augmented merge that survives Dask-emitted duplicate
-`xenium_cell_id` rows. Polygon cleanup then runs
-`shapely.make_valid → largest connected piece`. It drops empty
-/ non-Polygon / sub-`area_threshold_px` (default 20 sq px)
-geometries, and sanity-checks for finite coords, ≥3 unique
-vertices, and `is_valid`. Nuclei without a label optionally
-inherit their sibling cell's label
+After the label join, polygon cleanup drops empty /
+non-Polygon geometries and geometries smaller than
+`area_threshold_px` (default 20 sq px). Nuclei without a
+label optionally inherit their sibling cell's label
 (`nuclei_inherit_classification: true`).
 
 **Writes** under `celltyped/<he_job_id>/`:
@@ -336,27 +327,21 @@ inherit their sibling cell's label
 
 ### `viz` — publication-shape overlay PNG
 
-Draws warped boundaries on a downsampled H&E thumbnail. The
-default (`viz.render_boundaries = nucleus`) draws only nucleus
-outlines. This is the cleanest read of registration quality
-against H&E's hematoxylin-stained nuclei. Two alternatives are
-exposed via `--viz-render-boundaries`: `cell` draws cell
-polygons (semi-transparent fill) only, and `both`
-draws nucleus outlines on top of the cell polygons.
-Thumbnails are read via OpenSlide with a `tifffile` fallback.
+Draws warped boundaries on a downsampled H&E thumbnail.
+The default (`viz.render_boundaries = nucleus`) draws only
+nucleus outlines — the cleanest read of registration
+quality against H&E's hematoxylin-stained nuclei. Two
+alternatives are exposed via `--viz-render-boundaries`:
+`cell` draws cell polygons (semi-transparent fill) only,
+and `both` draws nucleus outlines on top of the cell
+polygons.
 
 Cell-type labels drive a qualitative palette (`tab20` by
-default). Users can override colors in
-`viz.classification_palette`. Any label not in the override
-map is auto-assigned a colormap slot in first-appearance
-order (deterministic across re-runs).
+default). Override colors in `viz.classification_palette`.
 
-The renderer is dask-friendly: polygon batches are drawn in
-chunks. This lets a whole-slide overlay skip fitting all
-geometries in memory as a single frame.
-
-**Writes:** `viz/<he_job_id>/<sample>_overlay.png` at `viz.dpi` (default
-200 DPI), with a legend of the labels present in the data.
+**Writes:** `viz/<he_job_id>/<sample>_overlay.png` at
+`viz.dpi` (default 200 DPI), with a legend of the labels
+present in the data.
 
 ## Installation
 
@@ -914,18 +899,16 @@ warp cluster. Drop to 128 GB only if you also drop that cap.
 
 ### VSI inputs: automatic BioFormats conversion (unified)
 
-Since v0.2.0, `submit_he_registration.sh` handles VSI inputs
-end-to-end without any extra flags. Pass `--he-slide /path/to/foo.vsi`
+`submit_he_registration.sh` handles VSI inputs end-to-end
+without any extra flags. Pass `--he-slide /path/to/foo.vsi`
 and the launcher:
 
 1. Detects the `.vsi` extension.
-2. Submits a `bioformats2raw` + `raw2ometiff` conversion job to
-   Slurm as its own record.
-3. Rewrites `--he-slide` internally to the converted OME-TIFF at
-   `<run_dir>/he_registration/converted/<sample>_he.ome.tif`
-   (the same canonical location
-   `hexenium.stages.he_preprocess.discover_existing_ometiff`
-   already checks for).
+2. Submits a `bioformats2raw` + `raw2ometiff` conversion
+   job to Slurm as its own record.
+3. Rewrites `--he-slide` internally to the converted
+   OME-TIFF at
+   `<run_dir>/he_registration/converted/<sample>_he.ome.tif`.
 4. Submits the hexenium job with
    `--dependency=afterok:<conv_jobid>` so it runs only when the
    conversion finishes cleanly.
