@@ -259,6 +259,43 @@ just as reliably.
   python -c "from valis_hest import registration; print('OK')"    # expect OK
   ```
 
+- **`AttributeError: module 'cv2.xfeatures2d' has no attribute
+  'VGG_create'`** — first `from valis_hest import feature_detectors`
+  (or any code path that pulls it — `from valis_hest import
+  registration`, `import valis_hest`). Root cause: your env has
+  more than one `opencv-*` PyPI distribution installed at the same
+  time. All four (`opencv-python`, `opencv-python-headless`,
+  `opencv-contrib-python`, `opencv-contrib-python-headless`)
+  install into the SAME `cv2/` module directory and are meant to
+  be mutually exclusive; when `pip install --no-deps` walks a
+  requirements file that pins several of them, whichever variant
+  lands LAST wins the shared files. If the stock `opencv-python`
+  wins, its `cv2.xfeatures2d` is empty (non-free algorithms
+  stripped) and `VGG_create` / `SIFT_create` / `BEBLID_create` all
+  disappear. Full diagnostic:
+  [comment 5349853726](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5349853726).
+
+  **Fix:**
+  ```bash
+  pip uninstall -y opencv-python opencv-python-headless \
+                   opencv-contrib-python opencv-contrib-python-headless
+  pip install --no-deps "opencv-contrib-python==4.13.0.92"
+  ```
+
+  Verify:
+  ```bash
+  python -c "import cv2; print(cv2.__version__)"                    # expect 4.13.0
+  python -c "import cv2; print(hasattr(cv2.xfeatures2d, 'VGG_create'))"  # expect True
+  ```
+
+  The current `heRegistration-requirements.txt` pins ONLY
+  `opencv-contrib-python` (the other three were dropped in the
+  commit that added this note) so a clean install from the
+  requirements no longer triggers this bug — but an ad-hoc
+  `pip install opencv-python` (or a transitive dep that specifies
+  stock opencv without `--no-deps`) can still overwrite the
+  contrib variant on disk.
+
 ### Verified min-blast-radius state
 
 Tracy validated the following pin set end-to-end on Gizmo

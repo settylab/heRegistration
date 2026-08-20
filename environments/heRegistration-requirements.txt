@@ -130,9 +130,19 @@ nvidia-nvjitlink-cu12==12.4.127
 nvidia-nvtx-cu12==12.4.127
 ome-types==0.5.3
 ome-zarr==0.12.2
+# opencv: MUST be `opencv-contrib-python` ONLY. All four opencv PyPI
+# distributions (opencv-python, opencv-python-headless,
+# opencv-contrib-python, opencv-contrib-python-headless) install into
+# the same `cv2/` directory and are meant to be mutually exclusive.
+# When more than one is pinned here, `pip install --no-deps -r ...`
+# installs each in turn and whichever variant lands LAST wins the
+# shared cv2/ files. If the stock `opencv-python` wins, it strips
+# the non-free `xfeatures2d` algorithms — including `VGG_create` —
+# and `from valis_hest import feature_detectors` (line 227) crashes
+# with `AttributeError: module 'cv2.xfeatures2d' has no attribute
+# 'VGG_create'`. Diagnostic:
+# https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5349853726
 opencv-contrib-python==4.13.0.92
-opencv-contrib-python-headless==4.13.0.92
-opencv-python==4.13.0.92
 openslide-python==1.4.3
 param==2.3.2
 pathlib_abc==0.5.2
