@@ -249,10 +249,14 @@ micromamba activate heRegistration
 #    separate `pip install hest` step is needed.
 pip install --no-deps -r environments/heRegistration-requirements.txt
 
-# 5. Install the hexenium package itself.
-#    Non-editable is recommended for end users (see note below); use
-#    `pip install -e .` if you plan to hack on hexenium's source.
-pip install .
+# 5. Install the hexenium package itself. `--no-deps` here is
+#    load-bearing: without it, pip re-resolves pyproject.toml's
+#    declared deps against PyPI, potentially undoing the pinned pip
+#    layer from step 4 (external-user finding on
+#    settylab/msetty-nexus#35 comment 5356740940). Non-editable is
+#    recommended for end users (see note below); use
+#    `pip install --no-deps -e .` for development.
+pip install --no-deps .
 
 # 6. Sanity-check the install.
 python -c "import hest, valis_hest, valis_hest.registration, valis_hest.slide_io, dask, openslide; print('OK')"
@@ -318,7 +322,9 @@ pip install --no-deps "hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0"
 # The full pinned list is `environments/heRegistration-requirements.txt`
 # — the easiest way to install it is just to run step 4 of the
 # recommended flow above from the repo checkout.
-pip install .  # or `pip install -e .` for development
+pip install --no-deps .  # or `pip install --no-deps -e .` for development
+                          # (--no-deps stops pip re-resolving pyproject.toml
+                          #  and undoing the pinned layer above)
 ```
 
 ### Troubleshooting

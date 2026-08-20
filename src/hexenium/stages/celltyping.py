@@ -556,6 +556,34 @@ def _enough_vertices(poly) -> bool:
         return False
 
 
+def _refilter_gdf(
+    subset: gpd.GeoDataFrame, mask, *, geometry_col: str = "geometry",
+) -> gpd.GeoDataFrame:
+    """``subset[mask].copy()`` re-typed as a GeoDataFrame.
+
+    Guards against a geopandas quirk (surfaced by
+    ``settylab/msetty-nexus#35`` comment ``5356740940`` — cross-user
+    finding on real data): certain boolean-mask filters degrade an
+    EMPTY result set from ``GeoDataFrame`` to plain ``DataFrame``,
+    which then blows up the very next ``.geometry.apply()`` call
+    with ``AttributeError: 'DataFrame' object has no attribute
+    'geometry'``. Realistic triggers include a warp output whose
+    polygons all fall below ``area_threshold_px``, small-sample
+    runs, and corrupted / partial warp outputs.
+
+    Re-wrapping via ``gpd.GeoDataFrame(...)`` restores the type
+    without changing values. Cheap (empty case is essentially free;
+    non-empty case is a no-op on the already-typed subset since the
+    constructor recognises the geometry column).
+    """
+    filtered = subset[mask].copy()
+    if not isinstance(filtered, gpd.GeoDataFrame):
+        filtered = gpd.GeoDataFrame(
+            filtered, geometry=geometry_col, crs=None,
+        )
+    return filtered
+
+
 def _clean_boundary_gdf(
     gdf: gpd.GeoDataFrame,
     id_col: str,
@@ -616,31 +644,30 @@ def _clean_boundary_gdf(
         try:
             cand_idx = subset.sindex.query(roi, predicate="intersects")
             subset = subset.iloc[cand_idx].copy()
-            subset = subset[subset.intersects(roi)].copy()
+            subset = _refilter_gdf(subset, subset.intersects(roi))
         except Exception:
-            subset = subset[subset.intersects(roi)].copy()
+            subset = _refilter_gdf(subset, subset.intersects(roi))
 
     # 4. First fix_to_polygon.
     subset["geometry"] = subset["geometry"].apply(_fix_to_polygon)
-    subset = subset[subset.geometry.notna()].copy()
-    subset = gpd.GeoDataFrame(subset, geometry="geometry", crs=None)
+    subset = _refilter_gdf(subset, subset.geometry.notna())
 
     # 5. Optional ROI clip.
     if roi is not None:
         subset["geometry"] = subset.geometry.intersection(roi)
-        subset = subset[subset.geometry.notna()].copy()
-        subset = subset[~subset.geometry.is_empty].copy()
+        subset = _refilter_gdf(subset, subset.geometry.notna())
+        subset = _refilter_gdf(subset, ~subset.geometry.is_empty)
 
     # 6. Re-fix after clip.
     subset["geometry"] = subset["geometry"].apply(_fix_to_polygon)
-    subset = subset[subset.geometry.notna()].copy()
-    subset = subset[~subset.geometry.is_empty].copy()
-    subset = subset[subset.is_valid].copy()
-    subset = subset[subset.geometry.geom_type.isin(["Polygon"])].copy()
+    subset = _refilter_gdf(subset, subset.geometry.notna())
+    subset = _refilter_gdf(subset, ~subset.geometry.is_empty)
+    subset = _refilter_gdf(subset, subset.is_valid)
+    subset = _refilter_gdf(subset, subset.geometry.geom_type.isin(["Polygon"]))
 
     # 7. Drop small junk (config-driven, default 20 sq px).
     n_pre_area = len(subset)
-    subset = subset[subset.geometry.area > area_threshold_px].copy()
+    subset = _refilter_gdf(subset, subset.geometry.area > area_threshold_px)
     if len(subset) != n_pre_area:
         log(f"[celltype]   {boundary_type} area filter (>{area_threshold_px}) "
             f"dropped {n_pre_area - len(subset)}")
@@ -650,18 +677,22 @@ def _clean_boundary_gdf(
         n_pre_round = len(subset)
         subset["geometry"] = subset.geometry.apply(
             lambda g: _round_polygon(g, ndigits=round_ndigits))
-        subset = subset[subset.geometry.notna()].copy()
-        subset = subset[~subset.geometry.is_empty].copy()
-        subset = subset[subset.is_valid].copy()
+        subset = _refilter_gdf(subset, subset.geometry.notna())
+        subset = _refilter_gdf(subset, ~subset.geometry.is_empty)
+        subset = _refilter_gdf(subset, subset.is_valid)
         if len(subset) != n_pre_round:
             log(f"[celltype]   {boundary_type} rounding@{round_ndigits} "
                 f"dropped {n_pre_round - len(subset)}")
 
     # 9. Final sanity: finite coords + enough vertices + valid.
+    # Guard the .geometry.apply() sites with _refilter_gdf so an empty
+    # subset (all polygons dropped by earlier filters) doesn't crash
+    # here with AttributeError — see cross-user bug on
+    # settylab/msetty-nexus#35 comment 5356740940.
     n_pre_final = len(subset)
-    subset = subset[subset.geometry.apply(_finite_coords)].copy()
-    subset = subset[subset.geometry.apply(_enough_vertices)].copy()
-    subset = subset[subset.is_valid].copy()
+    subset = _refilter_gdf(subset, subset.geometry.apply(_finite_coords))
+    subset = _refilter_gdf(subset, subset.geometry.apply(_enough_vertices))
+    subset = _refilter_gdf(subset, subset.is_valid)
     if len(subset) != n_pre_final:
         log(f"[celltype]   {boundary_type} final sanity dropped {n_pre_final - len(subset)}")
 

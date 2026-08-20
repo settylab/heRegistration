@@ -84,14 +84,21 @@ file (pip refuses), so it lives on the CLI here.
 For end users:
 
 ```bash
-pip install .
+pip install --no-deps .
 ```
 
 For developers (editable):
 
 ```bash
-pip install -e .
+pip install --no-deps -e .
 ```
+
+`--no-deps` here is **load-bearing**: without it, pip re-resolves
+`pyproject.toml`'s declared deps against PyPI, which can override
+the pinned layer from step 4 (surfaced by an external user on
+`settylab/msetty-nexus#35` comment `5356740940`). With `--no-deps`,
+pip installs just the `hexenium` package + entry points and
+leaves your step-4 pins alone.
 
 Non-editable is recommended for end users: an editable install
 exposes the source tree to `sys.path`, so a stray import via a
@@ -99,10 +106,9 @@ working-directory Python — or a sibling `hexenium/` folder in
 `cwd` — can shadow the installed package and silently pull in
 half-updated modules.
 
-Both commands resolve `pyproject.toml`'s declared deps against the
-env you already prepared in steps 2-4, and the pins are loose
-enough to accept what's already installed (no re-downloads
-expected). Notably, `pyproject.toml` declares
+Both commands install just the `hexenium` package on top of the
+env you already prepared in steps 2-4. Notably, `pyproject.toml`
+declares
 `opencv-contrib-python` — matching what step 2 pinned + what
 `valis_hest` requires — so this step doesn't clobber the contrib
 `cv2/` files with stock ones. See the OpenCV drift entry in

@@ -61,15 +61,22 @@ class TestResolveCelltypeCol:
         cols = ["custom_label", "first_type"]
         assert _resolve_celltype_col(cols, "custom_label") == "custom_label"
 
-    def test_explicit_col_missing_fails_loud(self):
+    def test_explicit_col_missing_returns_none_for_fallback(self):
+        # Historic behavior (pre-Tracy 5352008910) was to raise
+        # KeyError. New contract: return ``None`` so the caller can
+        # fall back to ``UNLABELED`` for every row. The resolver
+        # itself just WARN-logs.
         cols = ["first_type"]
-        with pytest.raises(KeyError, match="missing celltype column 'nope'"):
-            _resolve_celltype_col(cols, "nope")
+        assert _resolve_celltype_col(cols, "nope") is None
 
-    def test_no_candidates_fails_loud(self):
+    def test_no_candidates_returns_none_for_fallback(self):
+        # Same: auto-detect failure now returns None + logs WARN
+        # instead of raising KeyError. Cross-ref cross-user finding on
+        # ``settylab/msetty-nexus#35`` comment ``5356740940`` — the
+        # stale KeyError assertion was one of the two stale
+        # TestResolveCelltypeCol tests.
         cols = ["x", "y"]
-        with pytest.raises(KeyError, match="could not auto-detect"):
-            _resolve_celltype_col(cols, "auto")
+        assert _resolve_celltype_col(cols, "auto") is None
 
     def test_candidate_order_is_authoritative(self):
         # Even if `celltype_updated` comes first alphabetically, the
@@ -761,3 +768,108 @@ class TestRangerDirect:
             "ranger-direct path should NOT fire when the legacy proseg-NN "
             "was explicitly opted into via --proseg-purified-h5ad"
         )
+
+
+# ---------------------------------------------------------------------
+# Empty-GeoDataFrame regression (cross-user finding on
+# ``settylab/msetty-nexus#35`` comment ``5356740940``): geopandas'
+# boolean-mask filter degrades an EMPTY GeoDataFrame result to a plain
+# DataFrame, which then crashes the very next ``.geometry.apply()``
+# call in ``_clean_boundary_gdf`` with ``AttributeError``. Realistic
+# triggers include a warp output where every polygon falls below
+# ``area_threshold_px``.
+# ---------------------------------------------------------------------
+class TestCleanBoundaryGdfEmpty:
+    def _seed_gdf(self, polygons, ids):
+        """Build the minimal shape ``_clean_boundary_gdf`` accepts."""
+        import geopandas as _gpd
+        return _gpd.GeoDataFrame(
+            {"xenium_cell_id": ids, "group": ["Tumor"] * len(ids)},
+            geometry=list(polygons), crs=None,
+        )
+
+    def test_all_polygons_below_area_threshold_returns_empty_gdf(self):
+        # Plant polygons whose areas are ALL below the default
+        # area_threshold_px = 20. Step 7 empties `subset`; the fix
+        # must keep the result a GeoDataFrame (not degrade to
+        # DataFrame) through the final-sanity block at step 9.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+        import geopandas as _gpd
+
+        # 2x2 polygons: area = 4 px² each. area_threshold_px default
+        # is 20, so ALL of these will get dropped.
+        polys = [
+            Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1", "lkkgeihi-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        # No AttributeError. Result is an empty GeoDataFrame with
+        # the expected columns.
+        assert isinstance(result, _gpd.GeoDataFrame), (
+            "expected GeoDataFrame; geopandas may have degraded the "
+            "empty result to DataFrame (the exact msetty-nexus#35 bug)"
+        )
+        assert len(result) == 0
+        assert set(result.columns) >= {"cell_id", "classification",
+                                       "boundary_type", "geometry"}
+
+    def test_starting_from_empty_gdf_returns_empty(self):
+        # Pathological starting state — no polygons at all. The
+        # earlier ROI/notna filters + area filter all pass through
+        # empty; step 9 must not crash.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+        import geopandas as _gpd
+
+        empty_input = _gpd.GeoDataFrame(
+            {"xenium_cell_id": [], "group": []},
+            geometry=[], crs=None,
+        )
+        result = _clean_boundary_gdf(
+            empty_input, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        assert isinstance(result, _gpd.GeoDataFrame)
+        assert len(result) == 0
+
+    def test_rounding_step_survives_empty_subset(self):
+        # Companion: with round_ndigits set, step 8 also runs a
+        # geometry.apply() on an empty subset. Guard covers both
+        # optional-rounding + final-sanity blocks.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+
+        polys = [
+            Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),  # area 4
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=2,
+        )
+        assert len(result) == 0
+
+    def test_mixed_pass_and_fail_still_works(self):
+        # Companion happy-adjacent: one polygon above threshold, one
+        # below. Result should retain the one above; and NOT crash
+        # even though the internal `subset.geometry.area >
+        # threshold` mask has a False.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+
+        polys = [
+            Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),  # area 100 > 20
+            Polygon([(20, 20), (22, 20), (22, 22), (20, 22)]),  # area 4 < 20
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1", "lkkgeihi-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        assert len(result) == 1
+        assert result["cell_id"].iloc[0] == "aaaaafep-1"
