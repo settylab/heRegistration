@@ -150,6 +150,38 @@ def _load_upstream_color_map(
 UNLABELED = "unlabeled"
 UNLABELED_RGB = [0x88, 0x88, 0x88]
 
+# Historic label from the pre-``26e78b0`` codebase. Legacy celltyped
+# parquets still on disk carry ``"Unclassified"`` rows. We do NOT
+# rewrite those files — instead we fold the legacy label into the
+# canonical ``UNLABELED`` at viz time so old and new runs render the
+# same shade of grey. Tracy on ``settylab/TracyY123-nexus#15`` comment
+# ``5360206242``.
+_LEGACY_UNCLASSIFIED = "Unclassified"
+
+
+def _canonicalize_classification(label) -> str:
+    """Return the canonical viz label for a ``.classification`` value.
+
+    Folds the historic ``"Unclassified"`` sentinel into ``UNLABELED``
+    so all "no celltype" cells resolve to the same palette entry
+    (``#888888``) regardless of when the parquet was written.
+    ``None`` and NaN (pandas' float representation of a missing entry
+    in an object column) also fold to ``UNLABELED``.
+    """
+    if label is None:
+        return UNLABELED
+    # NaN is the only float where x != x — dodge pandas' None→NaN
+    # coercion in mixed-type columns without importing pandas here.
+    try:
+        if label != label:
+            return UNLABELED
+    except Exception:
+        pass
+    s = str(label)
+    if s == _LEGACY_UNCLASSIFIED:
+        return UNLABELED
+    return s
+
 
 def _build_full_palette(
     labels,
@@ -163,25 +195,34 @@ def _build_full_palette(
       1. User-provided override (from YAML `viz.classification_palette`).
       2. ``"unlabeled"`` defaults to ``#888888`` (medium grey) if
          unspecified by (1) — Tracy `5352008910`.
-      3. "Unclassified" defaults to gray [180,180,180] if unspecified
-         by (1) — kept as an unbreaking alias for older tests / user
-         YAML that still reference the historic label.
-      4. Upstream cross-pipeline palette (`upstream_palette` — the
+      3. Upstream cross-pipeline palette (`upstream_palette` — the
          xenium-preprocess color map, keyed by celltype label). Fills
          labels not covered by (1) so the H&E overlay matches the UMAP
          for the same sample/run.
-      5. Any remaining label draws the next unused color from a
+      4. Any remaining label draws the next unused color from a
          qualitative matplotlib colormap (`tab20` by default → 20 hues,
          wraps around for more). Assignment order = first-appearance in
          `labels`, so runs are deterministic.
+
+    Labels are canonicalized via :func:`_canonicalize_classification`
+    before palette lookup — the historic ``"Unclassified"`` sentinel
+    folds into ``UNLABELED`` so old celltyped parquets render at the
+    same ``#888888`` as fresh ``unlabeled`` runs (B+fold decision,
+    Tracy `5360206242`).
     """
     import matplotlib.pyplot as plt
 
-    user_overrides = dict(user_overrides or {})
+    # Canonicalize the overrides dict too so a YAML entry keyed on the
+    # legacy "Unclassified" name still lands on the UNLABELED slot.
+    user_overrides = {
+        _canonicalize_classification(k): v
+        for k, v in (user_overrides or {}).items()
+    }
     user_overrides.setdefault(UNLABELED, list(UNLABELED_RGB))
-    # Legacy default for "Unclassified" — pre-Tracy-5352008910 label.
-    user_overrides.setdefault("Unclassified", [180, 180, 180])
-    upstream_palette = upstream_palette or {}
+    upstream_palette = {
+        _canonicalize_classification(k): v
+        for k, v in (upstream_palette or {}).items()
+    }
 
     cmap = plt.get_cmap(cmap_name)
     n_cmap = cmap.N if hasattr(cmap, "N") else 20
@@ -189,9 +230,7 @@ def _build_full_palette(
     out: dict = {}
     cmap_i = 0
     for lbl in labels:
-        if lbl is None:
-            continue
-        lbl = str(lbl)
+        lbl = _canonicalize_classification(lbl)
         if lbl in out:
             continue
         if lbl in user_overrides:
@@ -356,7 +395,16 @@ def run_viz(
     # them. Precedence: YAML overrides → upstream xenium-preprocess
     # color map (matches the summary UMAP for the same sample/run) →
     # `palette_cmap` fallback for anything still uncovered.
-    labels_in_data = gdf["classification"].dropna().unique().tolist()
+    # Canonicalize BEFORE the palette build so a legacy "Unclassified"
+    # row folds into UNLABELED and hits the same #888888 entry as a
+    # fresh "unlabeled" row (B+fold, Tracy `5360206242`).
+    raw_labels_in_data = gdf["classification"].dropna().unique().tolist()
+    labels_in_data = [_canonicalize_classification(lbl)
+                      for lbl in raw_labels_in_data]
+    # Preserve first-appearance order without duplicates.
+    seen = set()
+    labels_in_data = [lbl for lbl in labels_in_data
+                      if not (lbl in seen or seen.add(lbl))]
     upstream_palette = _load_upstream_color_map(xenium_run_dir, sample_id)
     full_palette = _build_full_palette(
         labels_in_data,
@@ -369,13 +417,19 @@ def run_viz(
     upstream_matched = [lbl for lbl in labels_in_data
                         if lbl not in yaml_overrides and lbl in upstream_palette]
     auto_labels = [lbl for lbl in labels_in_data
-                   if lbl not in yaml_overrides and lbl not in upstream_palette]
+                   if lbl not in yaml_overrides and lbl not in upstream_palette
+                   and lbl != UNLABELED]
     if yaml_matched:
         log(f"[viz] palette: {len(yaml_matched)} label(s) from YAML "
             f"classification_palette: {yaml_matched}")
     if upstream_matched:
         log(f"[viz] palette: {len(upstream_matched)} label(s) inherited "
             f"from upstream xenium color map: {upstream_matched}")
+    if UNLABELED in labels_in_data and UNLABELED not in yaml_overrides:
+        legacy = _LEGACY_UNCLASSIFIED in raw_labels_in_data
+        log(f"[viz] palette: 'unlabeled' → #888888 (default sentinel)"
+            + (f" — folded {_LEGACY_UNCLASSIFIED!r} legacy rows in as well"
+               if legacy else ""))
     if auto_labels:
         log(f"[viz] palette: {len(auto_labels)} label(s) auto-assigned "
             f"from cmap '{palette_cmap}': {auto_labels}")
@@ -408,12 +462,16 @@ def run_viz(
             continue
         verts_by_class: dict[str, list] = {}
         for _, row in sub.iterrows():
-            label = str(row.get("classification", "Unclassified"))
+            # Canonicalize BEFORE palette lookup so a legacy
+            # "Unclassified" row hits the same UNLABELED palette entry
+            # as a fresh "unlabeled" row — no separate rendering path.
+            label = _canonicalize_classification(row.get("classification"))
             verts_by_class.setdefault(label, []).append(_scaled_xy(row.geometry))
         for label, verts in verts_by_class.items():
             # classification_palette is now guaranteed to cover every
-            # label present in the data (see _build_full_palette above).
-            color = classification_palette.get(label) or classification_palette.get("Unclassified", [180, 180, 180])
+            # label present in the data (see _build_full_palette above,
+            # which canonicalises labels the same way).
+            color = classification_palette.get(label) or classification_palette.get(UNLABELED, list(UNLABELED_RGB))
             rgb = tuple(c / 255 for c in color)
             pc = PolyCollection(
                 verts,

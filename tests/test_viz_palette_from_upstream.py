@@ -189,30 +189,43 @@ def test_build_palette_mixed_sources_per_label():
     assert isinstance(palette["Neither"], list) and len(palette["Neither"]) == 3
 
 
-def test_build_palette_unclassified_defaults_to_gray_still_honoured():
-    """The pre-existing `Unclassified` → gray default remains in effect
-    when neither YAML nor upstream supply one."""
-    from hexenium.stages.viz import _build_full_palette
+def test_build_palette_unclassified_folds_to_unlabeled_default():
+    """Legacy ``"Unclassified"`` folds into the ``UNLABELED`` canonical
+    slot (Tracy `5360206242`, B+fold). The historic
+    ``[180, 180, 180]`` shade is gone; the returned palette carries
+    ``unlabeled → #888888`` and no separate ``Unclassified`` key.
+    See ``tests/test_viz_unclassified_fold.py`` for the full fold
+    matrix."""
+    from hexenium.stages.viz import (
+        UNLABELED,
+        UNLABELED_RGB,
+        _build_full_palette,
+    )
 
     palette = _build_full_palette(
         labels=["Unclassified"],
         user_overrides=None,
         upstream_palette=None,
     )
-    assert palette["Unclassified"] == [180, 180, 180]
+    assert UNLABELED in palette
+    assert palette[UNLABELED] == list(UNLABELED_RGB)
+    assert "Unclassified" not in palette
 
 
-def test_build_palette_yaml_unclassified_still_overrides_default_and_upstream():
-    """A YAML override for `Unclassified` beats both the gray default
-    AND any upstream entry — same precedence rule."""
-    from hexenium.stages.viz import _build_full_palette
+def test_build_palette_yaml_unclassified_override_routes_to_unlabeled():
+    """A YAML override keyed on the legacy ``"Unclassified"`` label
+    now routes to the ``UNLABELED`` canonical slot after the B+fold —
+    same precedence rule (YAML wins), same visual outcome. See
+    ``tests/test_viz_unclassified_fold.py`` for parity coverage."""
+    from hexenium.stages.viz import UNLABELED, _build_full_palette
 
     palette = _build_full_palette(
         labels=["Unclassified"],
         user_overrides={"Unclassified": [77, 77, 77]},
         upstream_palette={"Unclassified": [0, 0, 0]},
     )
-    assert palette["Unclassified"] == [77, 77, 77]
+    assert palette[UNLABELED] == [77, 77, 77]
+    assert "Unclassified" not in palette
 
 
 # ---------- End-to-end through run_viz ------------------------------
