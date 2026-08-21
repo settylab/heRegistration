@@ -363,80 +363,65 @@ Both steps are captured in the order they should be run in
 `--no-deps` on the pip step is **load-bearing** and must live on the
 CLI (see the [why](#why---no-deps-is-mandatory) box below).
 
-### Recommended (validated on Fred Hutch Gizmo, 2026-08)
-
-The steps below are the exact sequence Tracy validated end-to-end on
-`rhino` with `micromamba 2.6.2`. `conda` works too — swap the tool
-name in step 2 (and `micromamba activate` → `conda activate` in step 3).
+### Recommended install
 
 ```bash
 # 1. Clone the repo
 git clone https://github.com/settylab/heRegistration.git
 cd heRegistration
 
-# 2. Create the conda env from the pinned spec. The yml intentionally
-#    does NOT declare a `name:` field, so you pick the env name with
-#    `-n`. `heRegistration` is the name the sbatch wrapper defaults to
-#    (`ENV_NAME`), so using it keeps everything downstream working
-#    without further overrides.
+# 2. Create the conda env from the pinned spec.
+#    Use `-n heRegistration` so the sbatch wrapper's ENV_NAME
+#    default finds it without further overrides.
 micromamba env create -n heRegistration -f environments/heRegistration.yml
-# or with conda:
-# conda env create -n heRegistration -f environments/heRegistration.yml
+# or: conda env create -n heRegistration -f environments/heRegistration.yml
 
 # 3. Activate
 micromamba activate heRegistration
 # or: conda activate heRegistration
 
 # 4. Install the pinned pip layer with `--no-deps`.
-#    This installs hest (git, v1.2.0), valis-wsi 1.1.0, valis_hest 0.0.2,
-#    and the ~160 supporting packages (torch, transformers, ultralytics,
-#    spatialdata, opencv, …) at the exact versions Tracy's working env
-#    was validated against. `--no-deps` is required — see the callout
-#    below. `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0`
-#    is already the first entry in the requirements file, so no
-#    separate `pip install hest` step is needed.
+#    Ships hest v1.2.0, valis-wsi 1.1.0, valis_hest 0.0.2, and
+#    their supporting stack. `--no-deps` is required — see the
+#    callout below.
 pip install --no-deps -r environments/heRegistration-requirements.txt
 
-# 5. Install the hexenium package itself. `--no-deps` here is
-#    load-bearing: without it, pip re-resolves pyproject.toml's
-#    declared deps against PyPI, potentially undoing the pinned pip
-#    layer from step 4 (external-user finding on
-#    settylab/msetty-nexus#35 comment 5356740940). Non-editable is
-#    recommended for end users (see note below); use
-#    `pip install --no-deps -e .` for development.
+# 5. Install hexenium itself. `--no-deps` here prevents pip
+#    from re-resolving pyproject.toml's deps and clobbering
+#    the pinned layer from step 4.
 pip install --no-deps .
 
 # 6. Sanity-check the install.
-python -c "import hest, valis_hest, valis_hest.registration, valis_hest.slide_io, dask, openslide; print('OK')"
+python -c "import hest, valis_hest, dask, openslide; print('OK')"
 hexenium --version
 hexenium run --help
 ```
 
-If any of the verification lines errors, jump to
+If any verification line errors, jump to
 [Troubleshooting](#troubleshooting) below.
+
+If your H&E is an Olympus `.vsi` file, you also need the
+BioFormats-based conversion tools — see [VSI inputs:
+automatic BioFormats conversion (unified)](#vsi-inputs-automatic-bioformats-conversion-unified)
+for the one-line `mamba install` (not included in the base
+env).
 
 #### Why `--no-deps` is mandatory
 
 `valis-wsi 1.1`'s declared `Requires-Dist` metadata caps
-`pandas<2.0`, `pyvips<3.0`, and `scikit-image<0.20`. HEST has
-similar declared-vs-actual divergences. The validated working
-env runs the *newer* pandas 2.3.x / pyvips 3.1.x /
-scikit-image 0.19.x branch. VALIS's actual code paths never
-touch the pandas-1 or pyvips-2 API, so the caps are
-over-defensive relative to the code hexenium calls. But pip's
-resolver refuses to install VALIS against pandas 2.x without
-`--no-deps`. Skipping `--no-deps` yields:
+`pandas<2.0` / `pyvips<3.0` / `scikit-image<0.20`. Hexenium
+runs the newer pandas 2.3.x / pyvips 3.1.x / scikit-image
+0.19.x branch — VALIS's actual code paths don't touch the
+capped APIs, so the declared caps are over-defensive. But
+pip's resolver refuses to install VALIS against pandas 2.x
+without `--no-deps`:
 
 ```
 ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0
 ```
 
-`--no-deps` cannot be inlined into the yml `pip:` block or
-the top of the requirements file. Micromamba treats each yml
-entry as a package name (`ERROR: Invalid requirement:
---no-deps`); pip refuses it from a requirements file (`no
-such option: --no-deps`). So the flag lives on the CLI in
-step 4.
+`--no-deps` must live on the CLI (not in the yml or
+requirements file — neither accepts it as a spec entry).
 
 #### Why `pip install .` (not `-e`) for end users
 
