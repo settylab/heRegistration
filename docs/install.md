@@ -8,7 +8,7 @@ their transitive stack. Both steps are captured in
 `environments/heRegistration.yml` and
 `environments/heRegistration-requirements.txt`.
 
-`--no-deps` on the pip step is **load-bearing** and must live on the
+`--no-deps` on the pip step is **essential** and must live on the
 CLI — see [Why `--no-deps`](#why---no-deps-is-mandatory) below. This
 mirrors the recommended flow in the top-level README; keep both in
 sync.
@@ -93,11 +93,10 @@ For developers (editable):
 pip install --no-deps -e .
 ```
 
-`--no-deps` here is **load-bearing**: without it, pip re-resolves
-`pyproject.toml`'s declared deps against PyPI, which can override
-the pinned layer from step 4 (surfaced by an external user on
-`settylab/msetty-nexus#35` comment `5356740940`). With `--no-deps`,
-pip installs just the `hexenium` package + entry points and
+`--no-deps` here is **essential**: without it, pip re-resolves
+`pyproject.toml`'s declared deps against PyPI, which can
+override the pinned layer from step 4. With `--no-deps`, pip
+installs just the `hexenium` package + entry points and
 leaves your step-4 pins alone.
 
 Non-editable is recommended for end users: an editable install
@@ -197,10 +196,7 @@ numpy, xarray, or their kin. The pins in `heRegistration.yml` +
 each drift; the recovery commands below fix an env that has already
 drifted.
 
-Each fix is diagnosed on `settylab/TracyY123-nexus#15`; comment IDs
-are linked so you can retrace the debugging thread.
-
-### The load-bearing rule
+### The `--no-deps` rule
 
 **Do NOT run `pip install --force-reinstall <pkg>` without
 `--no-deps` OR a co-pinned `numpy==1.26.4`.** `--force-reinstall`
@@ -236,8 +232,7 @@ just as reliably.
   as optional (`errors="ignore"`) but that swallow-branch only
   catches `ImportError`, not `AttributeError`, so a broken xarray
   crashes the whole chain even though nothing register+warp calls
-  actually needs xarray. Full diagnostic:
-  [comment 5335874791](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5335874791).
+  actually needs xarray.
 
   **Fix:**
   ```bash
@@ -260,8 +255,6 @@ just as reliably.
   common way an env drifts into this is a
   `pip install --force-reinstall <pkg>` where `<pkg>` has a loose
   `numpy>=1.22` bound and pip re-resolves numpy to the latest.
-  Full diagnostic:
-  [comment 5336001245](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5336001245).
 
   **Fix:**
   ```bash
@@ -288,8 +281,7 @@ just as reliably.
   lands LAST wins the shared files. If the stock `opencv-python`
   wins, its `cv2.xfeatures2d` is empty (non-free algorithms
   stripped) and `VGG_create` / `SIFT_create` / `BEBLID_create` all
-  disappear. Full diagnostic:
-  [comment 5349853726](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5349853726).
+  disappear.
 
   **Fix:**
   ```bash
@@ -321,8 +313,7 @@ just as reliably.
   `method='single'` (the method valis_hest's
   `serial_rigid.order_Dmat` uses); numpy 2.x treats
   `copy=None` as "copy if needed", but numpy 1.x rejects it
-  outright. Full diagnostic:
-  [comment 5361751664](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5361751664).
+  outright.
 
   **Fix:**
   ```bash
@@ -424,9 +415,7 @@ Skip this section entirely if your H&E is already
 
 ### Verified min-blast-radius state
 
-Tracy validated the following pin set end-to-end on Gizmo
-(`heRegistration-test` env, 2026-08-18; see
-[comment 5334721763](https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5334721763)):
+The following pin set has been validated end-to-end:
 
 | Package | Version |
 | --- | --- |
@@ -439,14 +428,14 @@ Tracy validated the following pin set end-to-end on Gizmo
 | `valis_hest` | `0.0.2` |
 
 The current `heRegistration.yml` + `heRegistration-requirements.txt`
-resolve to `numpy==1.26.4` + `xarray==2023.10.1` (the load-bearing
+resolve to `numpy==1.26.4` + `xarray==2023.10.1` (the essential
 pins) and permit `pandas<3` / `pyvips>=3` / `fastcluster==1.3.0`
 above them — the register+warp code paths run against both the
 pandas-1/pyvips-2 set above and the pandas-2/pyvips-3 set that the
 current pins permit. If you hit a bug we haven't seen and want to
 narrow the surface, `pip install --force-reinstall --no-deps
 "pyvips==2.2.3" "pandas==1.5.3" "fastcluster==1.2.6"` (all with
-`--no-deps`) reproduces Tracy's verified state.
+`--no-deps`) reproduces the previously-verified pandas-1/pyvips-2 state.
 
 ### Shims that are already permanent (nothing to do)
 

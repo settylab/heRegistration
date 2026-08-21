@@ -160,29 +160,15 @@ hexenium set-default-run \
 ### Celltype input
 
 The `celltype` stage assigns a cell-type label to every
-warped Xenium cell. Two source modes.
-
-**Default: ranger-direct.** With just `--xenium-h5ad` (or
-the h5ad hexenium derives from `--run-id`), the stage reads
-labels straight from `.obs["celltype"]`. The h5ad must
-already carry that column. Override the column name with
-`--celltype-col <name>` if yours is called something
-different (`--celltype-col auto` walks a small
-first-match-wins list).
-
-**Legacy: proseg-NN mapping.** Add `--proseg-purified-h5ad
-<path>` to switch to spatial NN-mapping of proseg labels
-onto xenium cells. Reach for this if you don't have a ranger
-h5ad with a celltype column, or if you want to override the
-ranger labels with a fresh NN fit against a custom proseg
-reference.
-
-If the requested column is missing or entirely empty, the
-stage labels every row `unlabeled` (rendered grey `#888888`)
-and continues. No crash.
+warped Xenium cell. The default (**ranger-direct**) reads
+labels from `--xenium-h5ad`'s `.obs["celltype"]`; the
+legacy path (`--proseg-purified-h5ad`) does spatial
+NN-mapping from a proseg h5ad. Missing / empty column →
+`unlabeled` fallback.
 
 See the [`celltype` stage docs](#celltype--assign-cell-type-labels-to-warped-polygons)
-for column-resolution precedence and the full set of knobs.
+for source-mode details, `--celltype-col` overrides,
+column-resolution precedence, and the full set of knobs.
 
 ## Installation
 
@@ -201,8 +187,10 @@ Both steps are captured in the order they should be run in
 `environments/heRegistration.yml` and
 `environments/heRegistration-requirements.txt`.
 
-`--no-deps` on the pip step is **load-bearing** and must live on the
-CLI (see the [why](#why---no-deps-is-mandatory) box below).
+`--no-deps` on the pip step is **essential** and must live
+on the CLI. See
+[`docs/install.md`](docs/install.md#why-no-deps-is-mandatory)
+for the resolver-conflict details.
 
 ### Recommended install
 
@@ -263,144 +251,24 @@ If you don't already have a conda env with
 a minimal `blosc`-only env recipe under
 `### VSI-input prerequisites`.
 
-#### Why `--no-deps` is mandatory
+### Advanced install topics
 
-`valis-wsi 1.1`'s declared `Requires-Dist` metadata caps
-`pandas<2.0` / `pyvips<3.0` / `scikit-image<0.20`. Hexenium
-runs the newer pandas 2.3.x / pyvips 3.1.x / scikit-image
-0.19.x branch — VALIS's actual code paths don't touch the
-capped APIs, so the declared caps are over-defensive. But
-pip's resolver refuses to install VALIS against pandas 2.x
-without `--no-deps`:
+For depth on installation edge cases, see
+[`docs/install.md`](docs/install.md):
 
-```
-ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0
-```
-
-`--no-deps` must live on the CLI (not in the yml or
-requirements file — neither accepts it as a spec entry).
-
-#### Why `pip install .` (not `-e`) for end users
-
-An editable install exposes the source tree to `sys.path`. A
-stray import via a working-directory Python — or a sibling
-`hexenium/` folder in `cwd` — can then shadow the installed
-package and silently pull in half-updated modules.
-Non-editable is safer for end users. If you are actively
-hacking on hexenium, the "Development & testing" section
-further down covers the editable install.
-
-### Manual install (bypass the env file)
-
-If you can't or don't want to use the env yml, this recipe reproduces
-the same working env by hand. The two-step conda solve + `--no-deps`
-pip layer structure is the same.
-
-```bash
-# Conda side (system libs + scientific-Python core)
-micromamba create -n heRegistration -c conda-forge -c bioconda \
-    python=3.11 'numpy<2' 'pandas<3' scipy pyarrow pyyaml \
-    'scanpy>=1.10' dask-geopandas shapely proj pyproj ipykernel \
-    importlib_metadata 'pycparser>=2.14' \
-    'libvips>=8.15' 'pyvips>=3' imagemagick openslide openjdk=11
-micromamba activate heRegistration
-
-# Pip side (VALIS + HEST + their transitive stack). See
-# environments/heRegistration-requirements.txt for the exact pins
-# every package should be installed at.
-pip install --no-deps valis-wsi==1.1.0 valis_hest==0.0.2
-pip install --no-deps "hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0" hestcore==1.0.4
-# HEST + VALIS have ~160 pip-only transitive deps (torch, transformers,
-# ultralytics, spatialdata, opencv-*, anndata 0.12 override, etc.).
-# The full pinned list is `environments/heRegistration-requirements.txt`
-# — the easiest way to install it is just to run step 4 of the
-# recommended flow above from the repo checkout.
-pip install --no-deps .  # or `pip install --no-deps -e .` for development
-                          # (--no-deps stops pip re-resolving pyproject.toml
-                          #  and undoing the pinned layer above)
-```
-
-### Troubleshooting
-
-The env captured in the two files above is versioned deliberately to
-reproduce exactly. If the install fails, the failure mode is almost
-always one of the following.
-
-- **`ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0`**
-  (or similar for `pyvips` / `scikit-image`) during step 4. You forgot
-  `--no-deps` — see [Why `--no-deps` is mandatory](#why---no-deps-is-mandatory)
-  above. Re-run with `pip install --no-deps -r
-  environments/heRegistration-requirements.txt`.
-- **`ModuleNotFoundError: No module named 'valis_hest'`** (or `hest`
-  / `torch` / `transformers` / `ultralytics`) when you run `hexenium`.
-  Step 4 was skipped or silently failed. Re-run it and re-check with
-  `pip list | grep -Ei 'valis|hest|torch|transformers'`. Expected:
-  `valis_hest 0.0.2`, `valis-wsi 1.1.0`, `hest 1.1.1` (installed from
-  the `v1.2.0` git tag; the package's internal version is `1.1.1`),
-  `hestcore 1.0.4`, `torch 2.6.0`, `transformers 5.1.0`,
-  `ultralytics 8.4.14`.
-- **`VIPS-WARNING: unable to load "vips-magick.so" ... libMagickCore-7.Q16HDRI.so.10:
-  cannot open shared object file`** at first `import pyvips` /
-  `libvips_init`. `imagemagick` is present in the yml exactly to
-  silence this — the warning should not fire on a freshly-created
-  env. If it does, your conda solve is stale or pinned to an older
-  yml revision: `micromamba clean -a` then re-create. The warning
-  itself is benign (the pipeline never uses that loader), so
-  `VIPS_WARNING=off` is a safe temporary silencer.
-- **Micromamba dependency cascade** during step 2 (`libvips` /
-  `gdk-pixbuf` / `librsvg` / `scanpy` "no viable options"). Almost
-  always a stale local cache or a stale `~/.condarc`. Fix in order:
-  1. `micromamba clean -a` (nukes cached repodata + packages).
-  2. If `~/.condarc` is a stale NFS handle (`[Errno 116] Stale file
-     handle`), refresh it: `rm ~/.condarc && touch ~/.condarc` (or
-     restore your original file).
-  3. Re-run `micromamba env create -n heRegistration -f
-     environments/heRegistration.yml` on a networked node.
-- **`openslide-bin` sdist build fails** at step 4 with "Install
-  OpenSlide from source". This is what the `@v1.2.0` pin on HEST
-  guards against — HEST HEAD depends on TRIDENT which pulls
-  `openslide-bin`, and its wheels don't cover older glibc. If you're
-  hitting this, verify line 1 of `environments/heRegistration-requirements.txt`
-  is `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0` and
-  not an unpinned `hest @ git+…HEST.git`.
-- **`hexenium` command not found** after step 5 succeeds. The wrong
-  env is active — check `which hexenium` and re-run `micromamba
-  activate heRegistration`.
-- **Sbatch job fails at env activation** with "environment
-  `heRegistration` not found". You created the env under a different
-  name in step 2. Either recreate as `heRegistration`, or pass the
-  name you used to the sbatch wrapper: `./scripts/submit_he_registration.sh
-  --env-name <your-env-name> …` (or export
-  `ENV_NAME=<your-env-name>` in your shell).
-
-If none of these match, `pip install --no-deps -r
-environments/heRegistration-requirements.txt -v` prints per-package
-progress and surfaces which entry pip is choking on — most useful
-when a wheel has been yanked from PyPI or a git ref has moved.
-
-#### Env drift after install (`--force-reinstall` gotchas)
-
-The `numpy==1.26.4` and `xarray==2023.10.1` pins in
-`heRegistration.yml` + `heRegistration-requirements.txt` are
-**load-bearing**.
-
-A stray `pip install --force-reinstall <pkg>` (or unpinned
-`pip install --upgrade`) re-resolves transitive dependencies.
-It can silently pull `numpy 2.x`. That then blows
-`fastcluster`'s compiled extension with `_ARRAY_API not
-found` / `numpy.core.multiarray failed to import`.
-
-A parallel drift for `xarray` (to 2026.x, needing pandas
-2.1's `NumpyExtensionArray`) breaks `import anndata` with
-`AttributeError: module 'pandas.arrays' has no attribute
-'NumpyExtensionArray'`.
-
-**Rule of thumb:** any `pip install --force-reinstall <pkg>` must
-be paired with `--no-deps` OR a co-pinned `numpy==1.26.4`.
-`docs/install.md`'s [Env drift & recovery](docs/install.md#env-drift--recovery)
-section carries the full postmortems and per-symptom recovery
-commands (linked back to `settylab/TracyY123-nexus#15` for the
-diagnostic trail).
+- [Why `--no-deps` is mandatory](docs/install.md#why-no-deps-is-mandatory)
+  — the pandas / pyvips / scikit-image over-cap in
+  `valis-wsi 1.1`'s declared metadata + why the flag must
+  live on the CLI.
+- [Manual install (advanced)](docs/install.md#manual-install-bypass-the-env-file)
+  — reproduce the working env without the yml.
+- [Troubleshooting](docs/install.md#troubleshooting) —
+  the seven most common install-time failures + fixes
+  (`ResolutionImpossible`, `ModuleNotFoundError`, VIPS
+  warnings, `openslide-bin` sdist, etc.).
+- [Env drift & recovery](docs/install.md#env-drift--recovery)
+  — `--force-reinstall` gotchas around the pinned
+  numpy / xarray / fastcluster / opencv-contrib layer.
 
 ## Quickstart
 
@@ -455,7 +323,7 @@ Common per-run overrides:
 - `--stages register warp celltype viz` — restrict which stages run
   (`he_preprocess` is a no-op for OME-TIFF input; skip explicitly when the
   input is a `.vsi` you don't want re-converted).
-- `--force-rerun` — nuke all sentinels and redo every requested stage.
+- `--force-rerun` — remove all sentinels and redo every requested stage.
 - `--force-preprocess` — force VSI → OME-TIFF re-conversion only.
 
 ## Invocation modes
@@ -957,72 +825,12 @@ avoids the s2-is-always-the-40x assumption. Override with
 `--vsi-series <N>` if the auto-pick ever gets it wrong for
 your data.
 
-**Prerequisites** — the two conversion tools are not
-included in the base `heRegistration` environment. The
-tested / recommended install path is the Glencoe binary
-zips; the conda-based install did not resolve reproducibly
-in our tested environment, so we don't ship it as the
-default.
-
-The launcher discovers the tools through two env vars:
-
-- `BFTOOLS_ROOT` — a directory containing the extracted
-  Glencoe zips (i.e. `$BFTOOLS_ROOT/bioformats2raw-*/bin/`
-  and `$BFTOOLS_ROOT/raw2ometiff-*/bin/` exist).
-- `LIBBLOSC_DIR` — a directory containing
-  `libblosc.so.1`. Any env's `lib/` that carries the
-  `conda-forge::blosc` library works (for example a
-  sibling env you already have around); the
-  `heRegistration` env's imagecodecs-vendored copy is
-  not on the discoverable path.
-
-Set both before running `submit_he_registration.sh`. The
-launcher (`scripts/submit_vsi_to_ometiff.sh`) prepends
-`$BFTOOLS_ROOT/…/bin/` onto `PATH` and `$LIBBLOSC_DIR`
-onto `LD_LIBRARY_PATH` automatically — you don't need to
-manage those two variables yourself.
-
-**Example install** — pick any writable directory
-(location is your choice; the pipeline discovers the
-tools via `BFTOOLS_ROOT`, not a fixed path). Below uses
-`$HOME/opt/bftools/`:
-
-```bash
-# 1. Download the Glencoe release zips
-#    (tested versions: bioformats2raw 0.12.1 + raw2ometiff 0.9.0):
-mkdir -p $HOME/opt/bftools
-cd $HOME/opt/bftools
-wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
-wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
-unzip bioformats2raw-0.12.1.zip
-unzip raw2ometiff-0.9.0.zip
-
-# 2. Point the launcher at the extracted zips + a libblosc:
-export BFTOOLS_ROOT=$HOME/opt/bftools
-export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
-```
-
-Release pages (for newer versions if needed — the
-launcher globs `bioformats2raw-*/bin` and
-`raw2ometiff-*/bin`, so any version co-installable with
-Java 11 works):
-
-- https://github.com/glencoesoftware/bioformats2raw/releases
-- https://github.com/glencoesoftware/raw2ometiff/releases
-
-Any environment that has `conda-forge::blosc` installed
-provides the right `libblosc.so.1` ABI for
-`raw2ometiff`'s JNA loader. If you don't already have
-one, create a minimal env just for the shared library:
-
-```bash
-micromamba create -n blosc -c conda-forge blosc -y
-export LIBBLOSC_DIR=$HOME/micromamba/envs/blosc/lib
-```
-
-See the docstring at the top of
-`scripts/submit_vsi_to_ometiff.sh` for the full env-var
-contract.
+**Prerequisites** — see Step 7 of [Recommended
+install](#recommended-install) above for the Glencoe-zip
+setup + `BFTOOLS_ROOT` / `LIBBLOSC_DIR` env vars. Full
+deep-dive (Java 11 note, minimal `blosc`-only env
+recipe, release-page links) in
+[`docs/install.md`](docs/install.md#vsi-input-prerequisites-only-if---he-slide-is-a-vsi-file).
 
 **Example** — a VSI-input invocation looks identical to any
 other input, just with a `.vsi` path:
@@ -1099,7 +907,7 @@ Methods-section template (fill in the version tag and Zenodo DOI):
 
 > Registration of the H&E whole-slide image to the matched Xenium DAPI
 > morphology channel was performed with hexenium v0.2.0 (DOI:
-> 10.5281/zenodo.PLACEHOLDER), a Python wrapper around VALIS (Gatenbee et
+> <TBD>), a Python wrapper around VALIS (Gatenbee et
 > al., 2023) via the `valis_hest` adapter and HEST (Jaume et al., 2024)
 > that composes rigid, non-rigid, and micro-registration transforms into
 > a single registrar. Xenium cell and nucleus segmentations were warped
