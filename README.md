@@ -30,6 +30,11 @@ the last invocation left off.
 [Development & testing](#development--testing) ·
 [Citation](#citation)
 
+**Deeper docs**: [`docs/install.md`](docs/install.md)
+(troubleshooting + env drift), [`docs/methods.md`](docs/methods.md)
+(algorithm details), [`docs/usage.md`](docs/usage.md)
+(extended examples).
+
 ## Pipeline overview
 
 Five stages. When `--he-slide` is a `.vsi` file, the HPC driver
@@ -178,182 +183,6 @@ and continues. No crash.
 
 See the [`celltype` stage docs](#celltype--assign-cell-type-labels-to-warped-polygons)
 for column-resolution precedence and the full set of knobs.
-
-## Stage details
-
-The subsections below cover user-facing behavior per stage.
-For algorithm details and library-level implementation
-(OpenSlide / tifffile writer settings, Dask worker + JVM
-lifecycle, Shapely polygon cleanup, palette assignment),
-see [`docs/methods.md`](docs/methods.md).
-
-### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
-
-If `--he-slide` points to an Olympus SlideScanner `.vsi`,
-this stage converts it to a pyramidal OME-TIFF matching
-10x's Xenium Explorer specification. If the input is
-already an OME-TIFF, the stage returns immediately and
-downstream stages consume the input as-is.
-
-The converted OME-TIFF is written **next to the source VSI**
-as `<vsi_dir>/<vsi_stem>.ome.tif` when that directory is
-writable. This lets a single conversion be reused across
-every pipeline invocation for that sample. When the source
-dir is read-only, the pipeline falls back to
-`<output_root_he>/converted/<sample_id>_he.ome.tif`. Re-runs
-auto-detect either location and skip re-conversion.
-`--force-preprocess` forces re-conversion of the VSI without
-touching downstream stages.
-
-### `register` — H&E ↔ Xenium DAPI alignment (VALIS)
-
-Registers the H&E to the DAPI morphology image using VALIS via
-`valis_hest`. The default `--mode full_with_micro` composes
-three transforms into one registrar:
-
-1. A rigid initial solve.
-2. A non-rigid B-spline solve at
-   `max_processed_image_dim_px = 1500`.
-3. A micro-registration refinement at
-   `max_non_rigid_registration_dim_px = 10000`.
-
-This matches stock HEST `register_dapi_he(micro_reg=True)`.
-Two diagnostic modes are available for sweeps: `rigid_only`
-(fastest, rigid only) and `rigid_nonrigid` (rigid + non-rigid,
-no micro).
-
-Macenko-style H&E deconvolution runs before feature detection
-by default. On faint-hematoxylin samples it can degrade
-alignment. Override with `--use-he-deconvolution false` when a
-run shows that failure mode.
-
-Reflection checking is on by default so mirrored slides are
-caught cheaply. To sidestep a hardcoded
-`he_key='aligned_fullres_HE'` in `valis_hest`, hexenium
-symlinks the user's H&E to that canonical name inside the
-per-sample workdir before invoking VALIS.
-
-**Writes:**
-`register/<he_job_id>/data/_registrar.pickle` — the composed rigid ×
-non-rigid × micro transforms — plus VALIS's per-stage image dumps under
-sibling `rigid_registration/`, `non_rigid_registration/`,
-`micro_registration/`, etc., and a cross-run
-`register/manifest.yaml` symlink pointing at the
-current-default registrar.
-
-### `warp` — apply the registrar to Xenium objects
-
-Applies the VALIS registrar to the Xenium
-`cell_boundaries.parquet` and `nucleus_boundaries.parquet`
-(and, optionally, `transcripts.parquet`) via HEST's
-`warp_and_save_xenium_objects`.
-
-Outputs are WKB-encoded GeoPandas parquets in H&E pixel
-space. Each row's Xenium `cell_id` is preserved for
-downstream joins.
-
-**Writes:** `warp/<he_job_id>/he_cell_seg.{parquet,geojson}` and
-`warp/<he_job_id>/he_nucleus_seg.{parquet,geojson}` (and
-`he_transcripts.parquet` when `--include-transcripts` is set). Parquet
-for programmatic downstream use, GeoJSON for viewers (QuPath,
-GeoJSON.io, `napari-geojson`, …).
-
-### `celltype` — assign cell-type labels to warped polygons
-
-Assigns a cell-type label to every warped Xenium cell. Viz
-uses these labels to colour the overlay; downstream analysis
-uses them to filter by class. Two source modes are available.
-The default now reads labels DIRECTLY off the query h5ad
-(post `rctd-split celltype_writeback`), so no NN mapping is
-needed in the normal xenium-preprocess → hexenium flow.
-
-**Default: ranger-direct.** With just `--xenium-h5ad` (or
-`--run-id` auto-deriving it), hexenium reads
-`xenium_ranger.h5ad`'s `.obs[<celltype_col>]` for every cell.
-Default column: `celltype` (matches
-`packages/rctd-split/config/default.yaml`'s
-`celltype_writeback.celltype_col`). Pass `--celltype-col <name>` to
-override for a custom-built ranger h5ad. `--celltype-col auto`
-falls through the historic precedence
-`celltype > first_type > primary_cell_type > celltype_updated`.
-
-No NN mapping in this mode — the label comes straight off
-the query h5ad. Hexenium's overlay reads the same
-`.obs["celltype"]` column that the xenium-preprocess
-summary reports read, so labels match unless the column
-has been rewritten between the two invocations.
-
-**Legacy: proseg-NN.** Pass `--proseg-purified-h5ad <path>`
-explicitly (in addition to `--xenium-h5ad`) to switch to the
-original NN-mapping path. For every xenium cell centroid,
-hexenium looks up the nearest proseg-purified cell and inherits
-its celltype label. This mode is kept for two cases:
-
-1. Standalone-mode users who don't run xenium-preprocess's
-   `rctd-split celltype_writeback`.
-2. Users who want to override the ranger labels with a fresh
-   NN fit against a custom proseg reference.
-
-**Missing / all-NaN column → `unlabeled`.** When the requested
-column doesn't exist, or exists but is entirely NaN / empty, the
-stage logs a WARN and labels every row `unlabeled`. Viz renders
-`unlabeled` as grey `#888888`. Per-row NaN / empty values also
-fall to `unlabeled` (only the affected rows). No crash.
-
-Auto-detection knobs:
-
-- **celltype column** (`--celltype-col`, default `celltype`) — set
-  to `auto` for precedence walk; set to a literal column name to
-  force a choice; unmatched → `unlabeled` fallback.
-- **Xenium id column** (`--id-col`, default `auto`) — every candidate is
-  shape-checked against the Xenium UUID regex (`^[a-z]{8}-\d+$`) before
-  use, so it can't silently pick Proseg's int64 index masquerading as
-  `cell_id`. Special value `__index__` reads from `.obs.index`.
-- **spatial coords** (proseg-NN mode only) — checks `.obsm['spatial']`
-  first, then falls back through `.obs['centroid_x'/'centroid_y']`,
-  `.obs['x_centroid'/'y_centroid']`, `.obs['x'/'y']`. Override with
-  `celltype.{proseg,xenium}_{x,y}_col` in the config YAML.
-
-After the label join, polygon cleanup drops empty /
-non-Polygon geometries and geometries smaller than
-`area_threshold_px` (default 20 sq px). Nuclei without a
-label optionally inherit their sibling cell's label
-(`nuclei_inherit_classification: true`).
-
-**Writes** under `celltyped/<he_job_id>/`:
-
-- `<sample>_cells_analysis.geojson` — cells, raw-float precision.
-- `<sample>_nuclei_analysis.geojson` — nuclei, raw-float precision.
-- `<sample>_cells_qupath.geojson` — cells, rounded (default 2 decimals)
-  + polygon-safety cleanup so QuPath's drag-and-drop importer accepts
-  them without invalid-polygon errors.
-- `<sample>_nuclei_qupath.geojson` — nuclei, ditto.
-- `<sample>_celltyped_wholeslide.parquet` — merged, analysis-precision
-  combined table feeding the viz stage.
-- `<sample>_celltype_annotation.parquet` — per-cell label
-  table (columns: `xenium_cell_id`, `group`, `nn_distance`),
-  written by both the ranger-direct and legacy proseg-NN
-  branches. In ranger-direct mode `nn_distance` is `NaN`
-  (no NN fit occurred); in proseg-NN mode it carries the
-  L2 distance to the winning proseg centroid.
-
-### `viz` — publication-shape overlay PNG
-
-Draws warped boundaries on a downsampled H&E thumbnail.
-The default (`viz.render_boundaries = nucleus`) draws only
-nucleus outlines — the cleanest read of registration
-quality against H&E's hematoxylin-stained nuclei. Two
-alternatives are exposed via `--viz-render-boundaries`:
-`cell` draws cell polygons (semi-transparent fill) only,
-and `both` draws nucleus outlines on top of the cell
-polygons.
-
-Cell-type labels drive a qualitative palette (`tab20` by
-default). Override colors in `viz.classification_palette`.
-
-**Writes:** `viz/<he_job_id>/<sample>_overlay.png` at
-`viz.dpi` (default 200 DPI), with a legend of the labels
-present in the data.
 
 ## Installation
 
@@ -573,49 +402,6 @@ section carries the full postmortems and per-symptom recovery
 commands (linked back to `settylab/TracyY123-nexus#15` for the
 diagnostic trail).
 
-## Invocation modes
-
-Three ways to point hexenium at a sample. Pick the one that matches how
-you're driving the pipeline; the on-disk output layout under the top-level
-run dir is identical in all three modes.
-
-### 1. Standalone
-
-Drive with `--sample-id` + `--he-slide` + `--xenium-bundle` +
-`--output-root`. Outputs land at `<output_root>/<sample_id>/`.
-
-If the `celltype` stage is in `--stages`, pass `--xenium-h5ad`
-so hexenium can read labels directly off its `.obs[<col>]`
-(the ranger-direct default). Add `--proseg-purified-h5ad`
-only if you want to opt in to the legacy proseg-NN mapping
-instead.
-
-### 2. Integrated-by-run-id
-
-Add `--run-id <upstream_run_id>` on top of the standalone
-set. Hexenium derives the xenium h5ad from the upstream
-`xenium-preprocess` layout at
-`<output-root>/<sample>/<sample>_<run-id>/spatial_adata/<sample>_xenium_ranger.h5ad`.
-All H&E outputs colocate under
-`<output-root>/<sample>/<sample>_<run-id>/he_registration/`.
-
-The celltype stage reads its labels directly from this
-ranger h5ad's `.obs["celltype"]` — no proseg lookup by
-default. Pass `--proseg-purified-h5ad <path>` explicitly to
-switch to the legacy proseg-NN code path.
-
-### 3. Integrated-by-h5ad
-
-Pass `--xenium-h5ad <path>` directly. Sample identity is
-read from `.uns['sample_id']` and `.uns['run_id']` on that
-h5ad. Outputs colocate under `<xenium_run_dir>/he_registration/`.
-Fails LOUD if `.uns` identity is missing or disagrees with a
-passed `--sample-id`.
-
-Celltype labels still come from this h5ad's
-`.obs["celltype"]`. Same ranger-direct default as mode 2;
-same legacy opt-in via explicit `--proseg-purified-h5ad`.
-
 ## Quickstart
 
 A bare `hexenium run …` runs the full pipeline under its defaults
@@ -671,6 +457,225 @@ Common per-run overrides:
   input is a `.vsi` you don't want re-converted).
 - `--force-rerun` — nuke all sentinels and redo every requested stage.
 - `--force-preprocess` — force VSI → OME-TIFF re-conversion only.
+
+## Invocation modes
+
+Three ways to point hexenium at a sample. Pick the one that matches how
+you're driving the pipeline; the on-disk output layout under the top-level
+run dir is identical in all three modes.
+
+### 1. Standalone
+
+Drive with `--sample-id` + `--he-slide` + `--xenium-bundle` +
+`--output-root`. Outputs land at `<output_root>/<sample_id>/`.
+
+If the `celltype` stage is in `--stages`, pass `--xenium-h5ad`
+so hexenium can read labels directly off its `.obs[<col>]`
+(the ranger-direct default). Add `--proseg-purified-h5ad`
+only if you want to opt in to the legacy proseg-NN mapping
+instead.
+
+### 2. Integrated-by-run-id
+
+Add `--run-id <upstream_run_id>` on top of the standalone
+set. Hexenium derives the xenium h5ad from the upstream
+`xenium-preprocess` layout at
+`<output-root>/<sample>/<sample>_<run-id>/spatial_adata/<sample>_xenium_ranger.h5ad`.
+All H&E outputs colocate under
+`<output-root>/<sample>/<sample>_<run-id>/he_registration/`.
+
+The celltype stage reads its labels directly from this
+ranger h5ad's `.obs["celltype"]` — no proseg lookup by
+default. Pass `--proseg-purified-h5ad <path>` explicitly to
+switch to the legacy proseg-NN code path.
+
+### 3. Integrated-by-h5ad
+
+Pass `--xenium-h5ad <path>` directly. Sample identity is
+read from `.uns['sample_id']` and `.uns['run_id']` on that
+h5ad. Outputs colocate under `<xenium_run_dir>/he_registration/`.
+Fails LOUD if `.uns` identity is missing or disagrees with a
+passed `--sample-id`.
+
+Celltype labels still come from this h5ad's
+`.obs["celltype"]`. Same ranger-direct default as mode 2;
+same legacy opt-in via explicit `--proseg-purified-h5ad`.
+
+## Stage details
+
+The subsections below cover user-facing behavior per stage.
+For algorithm details and library-level implementation
+(OpenSlide / tifffile writer settings, Dask worker + JVM
+lifecycle, Shapely polygon cleanup, palette assignment),
+see [`docs/methods.md`](docs/methods.md).
+
+### `he_preprocess` — VSI → OME-TIFF (no-op for OME-TIFF inputs)
+
+If `--he-slide` points to an Olympus SlideScanner `.vsi`,
+this stage converts it to a pyramidal OME-TIFF matching
+10x's Xenium Explorer specification. If the input is
+already an OME-TIFF, the stage returns immediately and
+downstream stages consume the input as-is.
+
+The converted OME-TIFF is written **next to the source VSI**
+as `<vsi_dir>/<vsi_stem>.ome.tif` when that directory is
+writable. This lets a single conversion be reused across
+every pipeline invocation for that sample. When the source
+dir is read-only, the pipeline falls back to
+`<output_root_he>/converted/<sample_id>_he.ome.tif`. Re-runs
+auto-detect either location and skip re-conversion.
+`--force-preprocess` forces re-conversion of the VSI without
+touching downstream stages.
+
+### `register` — H&E ↔ Xenium DAPI alignment (VALIS)
+
+Registers the H&E to the DAPI morphology image using VALIS via
+`valis_hest`. The default `--mode full_with_micro` composes
+three transforms into one registrar:
+
+1. A rigid initial solve.
+2. A non-rigid B-spline solve at
+   `max_processed_image_dim_px = 1500`.
+3. A micro-registration refinement at
+   `max_non_rigid_registration_dim_px = 10000`.
+
+This matches stock HEST `register_dapi_he(micro_reg=True)`.
+Two diagnostic modes are available for sweeps: `rigid_only`
+(fastest, rigid only) and `rigid_nonrigid` (rigid + non-rigid,
+no micro).
+
+Macenko-style H&E deconvolution runs before feature detection
+by default. On faint-hematoxylin samples it can degrade
+alignment. Override with `--use-he-deconvolution false` when a
+run shows that failure mode.
+
+Reflection checking is on by default so mirrored slides are
+caught cheaply. To sidestep a hardcoded
+`he_key='aligned_fullres_HE'` in `valis_hest`, hexenium
+symlinks the user's H&E to that canonical name inside the
+per-sample workdir before invoking VALIS.
+
+**Writes:**
+`register/<he_job_id>/data/_registrar.pickle` — the composed rigid ×
+non-rigid × micro transforms — plus VALIS's per-stage image dumps under
+sibling `rigid_registration/`, `non_rigid_registration/`,
+`micro_registration/`, etc., and a cross-run
+`register/manifest.yaml` symlink pointing at the
+current-default registrar.
+
+### `warp` — apply the registrar to Xenium objects
+
+Applies the VALIS registrar to the Xenium
+`cell_boundaries.parquet` and `nucleus_boundaries.parquet`
+(and, optionally, `transcripts.parquet`) via HEST's
+`warp_and_save_xenium_objects`.
+
+Outputs are WKB-encoded GeoPandas parquets in H&E pixel
+space. Each row's Xenium `cell_id` is preserved for
+downstream joins.
+
+**Writes:** `warp/<he_job_id>/he_cell_seg.{parquet,geojson}` and
+`warp/<he_job_id>/he_nucleus_seg.{parquet,geojson}` (and
+`he_transcripts.parquet` when `--include-transcripts` is set). Parquet
+for programmatic downstream use, GeoJSON for viewers (QuPath,
+GeoJSON.io, `napari-geojson`, …).
+
+### `celltype` — assign cell-type labels to warped polygons
+
+Assigns a cell-type label to every warped Xenium cell. Viz
+uses these labels to colour the overlay; downstream analysis
+uses them to filter by class. Two source modes are available.
+The default now reads labels DIRECTLY off the query h5ad
+(post `rctd-split celltype_writeback`), so no NN mapping is
+needed in the normal xenium-preprocess → hexenium flow.
+
+**Default: ranger-direct.** With just `--xenium-h5ad` (or
+`--run-id` auto-deriving it), hexenium reads
+`xenium_ranger.h5ad`'s `.obs[<celltype_col>]` for every cell.
+Default column: `celltype` (matches
+`packages/rctd-split/config/default.yaml`'s
+`celltype_writeback.celltype_col`). Pass `--celltype-col <name>` to
+override for a custom-built ranger h5ad. `--celltype-col auto`
+falls through the historic precedence
+`celltype > first_type > primary_cell_type > celltype_updated`.
+
+No NN mapping in this mode — the label comes straight off
+the query h5ad. Hexenium's overlay reads the same
+`.obs["celltype"]` column that the xenium-preprocess
+summary reports read, so labels match unless the column
+has been rewritten between the two invocations.
+
+**Legacy: proseg-NN.** Pass `--proseg-purified-h5ad <path>`
+explicitly (in addition to `--xenium-h5ad`) to switch to the
+original NN-mapping path. For every xenium cell centroid,
+hexenium looks up the nearest proseg-purified cell and inherits
+its celltype label. This mode is kept for two cases:
+
+1. Standalone-mode users who don't run xenium-preprocess's
+   `rctd-split celltype_writeback`.
+2. Users who want to override the ranger labels with a fresh
+   NN fit against a custom proseg reference.
+
+**Missing / all-NaN column → `unlabeled`.** When the requested
+column doesn't exist, or exists but is entirely NaN / empty, the
+stage logs a WARN and labels every row `unlabeled`. Viz renders
+`unlabeled` as grey `#888888`. Per-row NaN / empty values also
+fall to `unlabeled` (only the affected rows). No crash.
+
+Auto-detection knobs:
+
+- **celltype column** (`--celltype-col`, default `celltype`) — set
+  to `auto` for precedence walk; set to a literal column name to
+  force a choice; unmatched → `unlabeled` fallback.
+- **Xenium id column** (`--id-col`, default `auto`) — every candidate is
+  shape-checked against the Xenium UUID regex (`^[a-z]{8}-\d+$`) before
+  use, so it can't silently pick Proseg's int64 index masquerading as
+  `cell_id`. Special value `__index__` reads from `.obs.index`.
+- **spatial coords** (proseg-NN mode only) — checks `.obsm['spatial']`
+  first, then falls back through `.obs['centroid_x'/'centroid_y']`,
+  `.obs['x_centroid'/'y_centroid']`, `.obs['x'/'y']`. Override with
+  `celltype.{proseg,xenium}_{x,y}_col` in the config YAML.
+
+After the label join, polygon cleanup drops empty /
+non-Polygon geometries and geometries smaller than
+`area_threshold_px` (default 20 sq px). Nuclei without a
+label optionally inherit their sibling cell's label
+(`nuclei_inherit_classification: true`).
+
+**Writes** under `celltyped/<he_job_id>/`:
+
+- `<sample>_cells_analysis.geojson` — cells, raw-float precision.
+- `<sample>_nuclei_analysis.geojson` — nuclei, raw-float precision.
+- `<sample>_cells_qupath.geojson` — cells, rounded (default 2 decimals)
+  + polygon-safety cleanup so QuPath's drag-and-drop importer accepts
+  them without invalid-polygon errors.
+- `<sample>_nuclei_qupath.geojson` — nuclei, ditto.
+- `<sample>_celltyped_wholeslide.parquet` — merged, analysis-precision
+  combined table feeding the viz stage.
+- `<sample>_celltype_annotation.parquet` — per-cell label
+  table (columns: `xenium_cell_id`, `group`, `nn_distance`),
+  written by both the ranger-direct and legacy proseg-NN
+  branches. In ranger-direct mode `nn_distance` is `NaN`
+  (no NN fit occurred); in proseg-NN mode it carries the
+  L2 distance to the winning proseg centroid.
+
+### `viz` — publication-shape overlay PNG
+
+Draws warped boundaries on a downsampled H&E thumbnail.
+The default (`viz.render_boundaries = nucleus`) draws only
+nucleus outlines — the cleanest read of registration
+quality against H&E's hematoxylin-stained nuclei. Two
+alternatives are exposed via `--viz-render-boundaries`:
+`cell` draws cell polygons (semi-transparent fill) only,
+and `both` draws nucleus outlines on top of the cell
+polygons.
+
+Cell-type labels drive a qualitative palette (`tab20` by
+default). Override colors in `viz.classification_palette`.
+
+**Writes:** `viz/<he_job_id>/<sample>_overlay.png` at
+`viz.dpi` (default 200 DPI), with a legend of the labels
+present in the data.
 
 ## Output tree
 
