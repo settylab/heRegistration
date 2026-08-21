@@ -48,7 +48,9 @@ the canonical layout that xenium-preprocess-pipeline peers with:
     └────────────────┘        │ (no-op for TIFF)  │  │
                               └───────────────────┘  │
                                                      ▼
-                                    converted/<sample>_he.ome.tif
+                                    <sample>_he.ome.tif
+                                    (location depends on writability;
+                                     see he_preprocess stage details)
                                                      │
                                                      │
     Xenium bundle                                    │
@@ -99,6 +101,9 @@ the canonical layout that xenium-preprocess-pipeline peers with:
                                         │
                                         ▼
                               viz/<he_job_id>/<sample>_overlay.png
+
+                              (only on --set-default-on-success or
+                               hexenium set-default-run:)
                               output/summary.html
                               output/{register,warp,celltyped,viz}   [symlinks]
 ```
@@ -121,10 +126,11 @@ for install requirements and options.
 
 ### Choosing / promoting the default registration
 
-Every stage writes into its own `<he_job_id>` shard. The
-`output/{register,warp,celltyped,viz}` symlinks point at the
-"default" run per stage, so `output/register/` etc. always
-show one canonical run for browsing.
+Every stage writes into its own `<he_job_id>` shard. Once a
+run is promoted (see below), the
+`output/{register,warp,celltyped,viz}` symlinks point at
+that run so `output/register/` etc. show one canonical run
+for browsing.
 
 **Auto-promote on success.** Add `--set-default-on-success`
 to `hexenium run`. When the run completes cleanly, the
@@ -143,7 +149,7 @@ hexenium set-default-run \
 ```
 
 `hexenium set-default-run --help` lists the per-stage flags
-(`--register-run-id`, `--warp-run-id`, `--celltype-run-id`,
+(`--register-run-id`, `--warp-run-id`, `--celltyped-run-id`,
 `--viz-run-id`) — you can retarget any subset independently.
 
 ### Celltype input
@@ -232,7 +238,8 @@ per-sample workdir before invoking VALIS.
 non-rigid × micro transforms — plus VALIS's per-stage image dumps under
 sibling `rigid_registration/`, `non_rigid_registration/`,
 `micro_registration/`, etc., and a cross-run
-`register/manifest.yaml` pointing at the latest registrar.
+`register/manifest.yaml` symlink pointing at the
+current-default registrar.
 
 ### `warp` — apply the registrar to Xenium objects
 
@@ -270,9 +277,11 @@ override for a custom-built ranger h5ad. `--celltype-col auto`
 falls through the historic precedence
 `celltype > first_type > primary_cell_type > celltype_updated`.
 
-No NN mapping in this mode — the label comes straight off the
-query h5ad, so hexenium's overlay uses THE SAME labels the
-xenium-preprocess summary reports use. Zero drift risk.
+No NN mapping in this mode — the label comes straight off
+the query h5ad. Hexenium's overlay reads the same
+`.obs["celltype"]` column that the xenium-preprocess
+summary reports read, so labels match unless the column
+has been rewritten between the two invocations.
 
 **Legacy: proseg-NN.** Pass `--proseg-purified-h5ad <path>`
 explicitly (in addition to `--xenium-h5ad`) to switch to the
@@ -321,9 +330,12 @@ label optionally inherit their sibling cell's label
 - `<sample>_nuclei_qupath.geojson` — nuclei, ditto.
 - `<sample>_celltyped_wholeslide.parquet` — merged, analysis-precision
   combined table feeding the viz stage.
-- `<sample>_celltype_annotation.parquet` — the NN-mapping annotation
-  table (xenium cell_id ↔ proseg cell_id ↔ label ↔ distance), kept as a
-  debug sidecar.
+- `<sample>_celltype_annotation.parquet` — per-cell label
+  table (columns: `xenium_cell_id`, `group`, `nn_distance`),
+  written by both the ranger-direct and legacy proseg-NN
+  branches. In ranger-direct mode `nn_distance` is `NaN`
+  (no NN fit occurred); in proseg-NN mode it carries the
+  L2 distance to the winning proseg centroid.
 
 ### `viz` — publication-shape overlay PNG
 
@@ -675,7 +687,7 @@ under an upstream xenium run dir; standalone mode places it under
 │                                                <vsi_dir> was read-only; the
 │                                                default write is next to the VSI)
 ├── register/
-│   ├── manifest.yaml                          ← cross-run provenance (latest registrar)
+│   ├── manifest.yaml                          ← symlink to current-default registrar
 │   └── <he_job_id>/
 │       ├── data/_registrar.pickle             ← VALIS composed transform (sentinel)
 │       ├── rigid_registration/
@@ -698,16 +710,19 @@ under an upstream xenium run dir; standalone mode places it under
 │       ├── <sample>_cells_qupath.geojson      ← rounded + polygon-safe
 │       ├── <sample>_nuclei_qupath.geojson
 │       ├── <sample>_celltyped_wholeslide.parquet  ← merged, feeds viz
-│       └── <sample>_celltype_annotation.parquet   ← NN debug sidecar
+│       └── <sample>_celltype_annotation.parquet   ← label table (both modes; NaN nn_distance in ranger-direct)
 └── viz/
     └── <he_job_id>/
         └── <sample>_overlay.png               ← H&E + warped boundaries
 ```
 
-**`<he_job_id>` precedence** (three tiers): `--he-job-id` > `$SLURM_JOB_ID`
-> `YYYYMMDDTHHMMSS` timestamp. Under sbatch the Slurm job id is used
-automatically; interactive runs fall back to a UTC timestamp so
-back-to-back runs never share a folder.
+**`<he_job_id>` precedence** (highest wins):
+
+1. `--he-job-id` — explicit CLI override.
+2. `$SLURM_JOB_ID` — set automatically under `sbatch` /
+   `srun`.
+3. `YYYYMMDDTHHMMSS` — local-time timestamp
+   (interactive fallback, 1-second resolution).
 
 **Logs** — per-run logs land at:
 
@@ -909,7 +924,12 @@ and the launcher:
    job to Slurm as its own record.
 3. Rewrites `--he-slide` internally to the converted
    OME-TIFF at
-   `<run_dir>/he_registration/converted/<sample>_he.ome.tif`.
+   `<run_dir>/he_registration/converted/<sample>_he.ome.tif`
+   (the HPC driver always writes to this pipeline-tree
+   location, whether or not the source VSI's directory is
+   writable; interactive `hexenium run` on a `.vsi`
+   prefers next-to-source — see the `he_preprocess`
+   stage docs).
 4. Submits the hexenium job with
    `--dependency=afterok:<conv_jobid>` so it runs only when the
    conversion finishes cleanly.
