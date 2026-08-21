@@ -395,16 +395,32 @@ pip install --no-deps .
 python -c "import hest, valis_hest, dask, openslide; print('OK')"
 hexenium --version
 hexenium run --help
+
+# 7. (Optional — only if you have .vsi H&E input.)
+#    Download the Glencoe release zips so the pipeline can
+#    auto-convert VSI to OME-TIFF via
+#    submit_he_registration.sh (tested versions:
+#    bioformats2raw 0.12.1 + raw2ometiff 0.9.0):
+mkdir -p $HOME/opt/bftools
+cd $HOME/opt/bftools
+wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
+wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
+unzip bioformats2raw-0.12.1.zip
+unzip raw2ometiff-0.9.0.zip
+
+# Point the launcher at the extracted zips + a libblosc:
+export BFTOOLS_ROOT=$HOME/opt/bftools
+export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
 ```
 
 If any verification line errors, jump to
 [Troubleshooting](#troubleshooting) below.
 
-If your H&E is an Olympus `.vsi` file, you also need the
-BioFormats-based conversion tools — see [VSI inputs:
-automatic BioFormats conversion (unified)](#vsi-inputs-automatic-bioformats-conversion-unified)
-for the one-line `mamba install` (not included in the base
-env).
+If you don't already have a conda env with
+`conda-forge::blosc` installed (needed for
+`LIBBLOSC_DIR`), [`docs/install.md`](docs/install.md) has
+a minimal `blosc`-only env recipe under
+`### VSI-input prerequisites`.
 
 #### Why `--no-deps` is mandatory
 
