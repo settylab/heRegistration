@@ -916,25 +916,72 @@ avoids the s2-is-always-the-40x assumption. Override with
 `--vsi-series <N>` if the auto-pick ever gets it wrong for
 your data.
 
-**Prerequisites** — install once per env:
+**Prerequisites** — the two conversion tools are not
+included in the base `heRegistration` environment. The
+tested / recommended install path is the Glencoe binary
+zips; the conda-based install did not resolve reproducibly
+in our tested environment, so we don't ship it as the
+default.
+
+The launcher discovers the tools through two env vars:
+
+- `BFTOOLS_ROOT` — a directory containing the extracted
+  Glencoe zips (i.e. `$BFTOOLS_ROOT/bioformats2raw-*/bin/`
+  and `$BFTOOLS_ROOT/raw2ometiff-*/bin/` exist).
+- `LIBBLOSC_DIR` — a directory containing
+  `libblosc.so.1`. Any env's `lib/` that carries the
+  `conda-forge::blosc` library works (for example a
+  sibling env you already have around); the
+  `heRegistration` env's imagecodecs-vendored copy is
+  not on the discoverable path.
+
+Set both before running `submit_he_registration.sh`. The
+launcher (`scripts/submit_vsi_to_ometiff.sh`) prepends
+`$BFTOOLS_ROOT/…/bin/` onto `PATH` and `$LIBBLOSC_DIR`
+onto `LD_LIBRARY_PATH` automatically — you don't need to
+manage those two variables yourself.
+
+**Example install** — pick any writable directory
+(location is your choice; the pipeline discovers the
+tools via `BFTOOLS_ROOT`, not a fixed path). Below uses
+`$HOME/opt/bftools/`:
 
 ```bash
-micromamba activate heRegistration
-mamba install -c conda-forge bioformats2raw raw2ometiff c-blosc -y
+# 1. Download the Glencoe release zips
+#    (tested versions: bioformats2raw 0.12.1 + raw2ometiff 0.9.0):
+mkdir -p $HOME/opt/bftools
+cd $HOME/opt/bftools
+wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
+wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
+unzip bioformats2raw-0.12.1.zip
+unzip raw2ometiff-0.9.0.zip
+
+# 2. Point the launcher at the extracted zips + a libblosc:
+export BFTOOLS_ROOT=$HOME/opt/bftools
+export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
 ```
 
-If conda-forge is unreachable, drop the Glencoe Software zips
-in a scratch dir and export `BFTOOLS_ROOT` + `LIBBLOSC_DIR`
-(the launcher picks them up automatically):
+Release pages (for newer versions if needed — the
+launcher globs `bioformats2raw-*/bin` and
+`raw2ometiff-*/bin`, so any version co-installable with
+Java 11 works):
+
+- https://github.com/glencoesoftware/bioformats2raw/releases
+- https://github.com/glencoesoftware/raw2ometiff/releases
+
+Any environment that has `conda-forge::blosc` installed
+provides the right `libblosc.so.1` ABI for
+`raw2ometiff`'s JNA loader. If you don't already have
+one, create a minimal env just for the shared library:
 
 ```bash
-TOOL=/path/to/scratch/bftools; mkdir -p $TOOL && cd $TOOL
-curl -L -O https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
-curl -L -O https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
-unzip -q bioformats2raw-0.12.1.zip && unzip -q raw2ometiff-0.9.0.zip
-export BFTOOLS_ROOT=$TOOL
-export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
+micromamba create -n blosc -c conda-forge blosc -y
+export LIBBLOSC_DIR=$HOME/micromamba/envs/blosc/lib
 ```
+
+See the docstring at the top of
+`scripts/submit_vsi_to_ometiff.sh` for the full env-var
+contract.
 
 **Example** — a VSI-input invocation looks identical to any
 other input, just with a `.vsi` path:

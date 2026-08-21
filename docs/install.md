@@ -343,42 +343,81 @@ just as reliably.
   a numpy-2.x-only wheel can drift the env back into the
   bug.
 
-### VSI-input prerequisites (optional; for `.vsi` H&E slides)
+### VSI-input prerequisites (only if `--he-slide` is a `.vsi` file)
 
-If your H&E is an Olympus `.vsi` file, hexenium's built-in
-`he_preprocess` stage (OpenSlide-based) will attempt to
-convert it to OME-TIFF. That works for most VSI subtypes, but
-some Olympus slides (verified live on Fred Hutch's
-`metx_liver_met/h_e/*.vsi` — comment 5360705326) aren't
-recognized by libopenslide's Olympus reader and fall out with
-`OpenSlideUnsupportedFormatError`. For those cases,
-`submit_he_registration.sh` automatically dispatches a
-BioFormats-backed conversion job (`bioformats2raw` +
-`raw2ometiff`) before the hexenium job, chained via
-`--dependency=afterok:` (the unified "Path B" flow).
+`submit_he_registration.sh` dispatches a
+`bioformats2raw` + `raw2ometiff` conversion job before
+running hexenium when the input is a `.vsi` file.
 
-The BioFormats tools install once per env:
+The two conversion tools are not included in the base
+`heRegistration` environment. The tested / recommended
+install path is the Glencoe binary zips; the conda-based
+install did not resolve reproducibly in our tested
+environment, so we don't ship it as the default.
+
+The launcher discovers the tools through two env vars:
+
+- `BFTOOLS_ROOT` — a directory containing the extracted
+  Glencoe zips (i.e.
+  `$BFTOOLS_ROOT/bioformats2raw-*/bin/` and
+  `$BFTOOLS_ROOT/raw2ometiff-*/bin/` exist).
+- `LIBBLOSC_DIR` — a directory containing
+  `libblosc.so.1`. Any env's `lib/` that carries
+  `conda-forge::blosc` works (for example a sibling env
+  you already have around); the `heRegistration` env's
+  imagecodecs-vendored copy is not on the discoverable
+  path.
+
+Set both before running `submit_he_registration.sh`. The
+launcher (`scripts/submit_vsi_to_ometiff.sh`) prepends
+`$BFTOOLS_ROOT/…/bin/` onto `PATH` and `$LIBBLOSC_DIR`
+onto `LD_LIBRARY_PATH` automatically — you don't need to
+manage those two variables yourself.
+
+**Install (once per host)** — pick any writable
+directory (location is your choice; the pipeline
+discovers the tools via `BFTOOLS_ROOT`, not a fixed
+path). Below uses `$HOME/opt/bftools/`:
 
 ```bash
-micromamba activate heRegistration
-mamba install -c conda-forge bioformats2raw raw2ometiff c-blosc -y
+# 1. Download the Glencoe release zips
+#    (tested versions: bioformats2raw 0.12.1 + raw2ometiff 0.9.0):
+mkdir -p $HOME/opt/bftools
+cd $HOME/opt/bftools
+wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
+wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
+unzip bioformats2raw-0.12.1.zip
+unzip raw2ometiff-0.9.0.zip
+
+# 2. Point the launcher at the extracted zips + a libblosc:
+export BFTOOLS_ROOT=$HOME/opt/bftools
+export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
 ```
 
-If conda-forge is unreachable from your cluster node, drop
-the Glencoe Software binary zips into a scratch dir and set
-two env vars (the sbatch scripts pick them up automatically):
+Release pages (newer versions also work — the launcher
+globs `bioformats2raw-*/bin` and `raw2ometiff-*/bin`, so
+version isn't hard-coded):
+
+- https://github.com/glencoesoftware/bioformats2raw/releases
+- https://github.com/glencoesoftware/raw2ometiff/releases
+
+Any environment with `conda-forge::blosc` installed
+provides the right `libblosc.so.1` ABI. If you don't
+already have one, create a minimal env just for the
+library:
 
 ```bash
-TOOL=/path/to/scratch/bftools; mkdir -p $TOOL && cd $TOOL
-curl -L -O https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1/bioformats2raw-0.12.1.zip
-curl -L -O https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
-unzip -q bioformats2raw-0.12.1.zip && unzip -q raw2ometiff-0.9.0.zip
-export BFTOOLS_ROOT=$TOOL
-export LIBBLOSC_DIR=/path/to/any/env/with/c-blosc/lib
+micromamba create -n blosc -c conda-forge blosc -y
+export LIBBLOSC_DIR=$HOME/micromamba/envs/blosc/lib
 ```
 
-Full details: README ["HPC usage (Slurm) — VSI inputs:
-automatic BioFormats conversion (unified)"](../README.md#vsi-inputs-automatic-bioformats-conversion-unified).
+See the docstring at the top of
+`scripts/submit_vsi_to_ometiff.sh` for the full env-var
+contract.
+
+Full workflow details: README ["HPC usage (Slurm) — VSI
+inputs: automatic BioFormats conversion
+(unified)"](../README.md#vsi-inputs-automatic-bioformats-conversion-unified).
 
 Skip this section entirely if your H&E is already
 `.ome.tif` / `.ome.tiff` / `.tif`.
