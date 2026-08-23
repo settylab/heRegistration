@@ -1,11 +1,15 @@
-#!/bin/bash -l
+#!/usr/bin/env bash
 # ---------------------------------------------------------------------
 # Slurm submission wrapper for the `hexenium` pipeline.
 #
-# `bash -l` makes this a LOGIN shell so ~/.bash_profile (and indirectly
-# ~/.bashrc on most setups) gets sourced — that's what initialises
-# micromamba in interactive sessions but is otherwise skipped in
-# non-interactive Slurm batch jobs.
+# NOT a login shell (`bash -l`): a login shell implicitly sources
+# ~/.bash_profile (and, on most setups, indirectly ~/.bashrc) via
+# `$HOME` at process startup — before this script's own body runs at
+# all. That's exactly the class of bug scripts/lib/env_config.sh exists
+# to eliminate (see its rationale comment), so it can't be the
+# mechanism that initialises micromamba here. Env activation instead
+# uses the resolved absolute values in scripts/env.local.conf — see the
+# "Env activation" section below.
 #
 # Usage — call directly (no `sbatch` prefix); the script self-submits
 # to slurm and routes its own .out/.err under the run folder:
@@ -38,8 +42,14 @@
 #
 # Environment variables:
 #   OUTPUT_ROOT — fallback for --output-root when not passed as a flag.
-#   ENV_NAME    — conda/micromamba env name (default: heRegistration).
-#                 Also settable via the --env-name CLI flag, which wins.
+#
+# Env activation: always by the absolute prefix pinned in
+# scripts/env.local.conf (scripts/write-env-config.sh) — never by name,
+# never re-derived from $HOME. See scripts/lib/env_config.sh for why.
+# --env-name / $ENV_NAME are still parsed (so old invocations don't hit
+# an "unknown flag" error) but only WARN if given; they no longer
+# select which env is activated. Re-run write-env-config.sh
+# --env-prefix <path> to point at a different env.
 #
 # VSI-specific flags (only honoured when --he-slide is a .vsi file):
 #   --force-preprocess  — re-run the VSI → OME-TIFF conversion even if
@@ -326,22 +336,27 @@ fi
 # Under-sbatch branch: activate the env and run hexenium.
 # ---------------------------------------------------------------------
 
-# ----- Conda / micromamba / mamba env activation ---------------------
-# Slurm batch jobs run non-interactive shells. Interactive setups put
-# micromamba's init in ~/.bashrc (which defines a SHELL FUNCTION
-# `micromamba`, not a binary) — non-interactive shells don't source
-# .bashrc, so the function is missing and `micromamba activate` fails.
+# ----- Env activation ---------------------------------------------------
+# Resolved from scripts/env.local.conf (scripts/write-env-config.sh),
+# NEVER re-derived from `$HOME` here: three real sbatch submissions of
+# this pipeline hung before the wrapper's own script body logged
+# anything (0-byte stdout, no output dir), while the SAME pipeline runs
+# fine interactively outside the sandbox — because inside the sandbox
+# `$HOME` is a non-persistent tmpfs, so a `$HOME`-relative micromamba
+# root / binary search resolves differently inside the job than in the
+# submitting shell. `sbatch --export=ALL` does NOT fix this: it forwards
+# env VAR values faithfully but does nothing to stop `$HOME` itself from
+# resolving to a different instance once the job's own shell starts.
+# See scripts/lib/env_config.sh for the full rationale. Activation is by
+# absolute PREFIX, never by name, for the same reason.
 #
-# Fix in three layers:
-#   1) source ~/.bashrc explicitly (most direct).
-#   2) ensure MAMBA_ROOT_PREFIX is set + the micromamba binary is on PATH.
-#   3) source the micromamba hook script to (re)define the shell function.
-#
-# ENV_NAME defaults to heRegistration. Two ways to override:
-#   CLI flag: ./scripts/submit_he_registration.sh --env-name other_env ...
-#   env var:  ENV_NAME=other_env ./scripts/submit_he_registration.sh ...
-# Precedence: --env-name > $ENV_NAME > heRegistration. The flag is
-# stripped from "$@" here so `hexenium run "$@"` below doesn't see it.
+# --env-name / $ENV_NAME previously selected a *named* env, activated
+# via a $HOME/MAMBA_ROOT_PREFIX-relative lookup — exactly the
+# sandbox-unsafe pattern this fix removes. Name-based activation is no
+# longer supported: this wrapper always activates the single prefix
+# pinned in scripts/env.local.conf. The flag is still parsed here (so
+# old invocations don't hit an "unknown flag" error from `hexenium run
+# "$@"` below) but only WARNS if given.
 _env_name_cli=""
 _filtered_args=()
 _args=("$@")
@@ -363,94 +378,26 @@ while [[ $_i -lt ${#_args[@]} ]]; do
     esac
 done
 set -- "${_filtered_args[@]+"${_filtered_args[@]}"}"
-ENV_NAME="${_env_name_cli:-${ENV_NAME:-heRegistration}}"
-activated=0
-
-# 1) Replay the interactive shell init. set +e so a noisy .bashrc
-# doesn't kill us under `set -euo pipefail`.
-if [[ -f "$HOME/.bashrc" ]]; then
-    echo "[submit] sourcing $HOME/.bashrc"
-    set +e; set +u
-    # shellcheck disable=SC1091
-    source "$HOME/.bashrc"
-    set -e; set -u
+if [[ -n "$_env_name_cli" || -n "${ENV_NAME:-}" ]]; then
+    echo "[submit] WARN: --env-name/\$ENV_NAME ('${_env_name_cli:-${ENV_NAME:-}}') is ignored." >&2
+    echo "[submit]   Activation is now always by the absolute prefix pinned in" >&2
+    echo "[submit]   scripts/env.local.conf. Re-run scripts/write-env-config.sh" >&2
+    echo "[submit]   --env-prefix <path> to point at a different env." >&2
 fi
 
-# 2) Make sure MAMBA_ROOT_PREFIX is set and the binary is reachable.
-: "${MAMBA_ROOT_PREFIX:=$HOME/micromamba}"
-export MAMBA_ROOT_PREFIX
-if ! command -v micromamba >/dev/null 2>&1; then
-    for bindir in \
-        "$MAMBA_ROOT_PREFIX/bin" \
-        "$HOME/.local/bin" \
-        "$HOME/micromamba/bin" \
-        "/app/software/micromamba/bin"; do
-        if [[ -x "$bindir/micromamba" ]]; then
-            echo "[submit] adding micromamba bin dir to PATH: $bindir"
-            export PATH="$bindir:$PATH"
-            break
-        fi
-    done
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/env_config.sh
+source "$SCRIPT_DIR/lib/env_config.sh"
 
-# 3) Ensure the shell function exists (not just the binary).
-if [[ "$(type -t micromamba 2>/dev/null)" != "function" ]]; then
-    for hook in \
-        "$MAMBA_ROOT_PREFIX/etc/profile.d/micromamba.sh" \
-        "$HOME/micromamba/etc/profile.d/micromamba.sh" \
-        "$HOME/.local/share/mamba/etc/profile.d/micromamba.sh" \
-        "/app/software/micromamba/etc/profile.d/micromamba.sh"; do
-        if [[ -f "$hook" ]]; then
-            echo "[submit] sourcing micromamba hook: $hook"
-            # shellcheck disable=SC1090
-            source "$hook"
-            break
-        fi
-    done
-fi
-
-# Now try to activate.
-if command -v micromamba >/dev/null 2>&1; then
-    if micromamba activate "$ENV_NAME" 2>/dev/null; then
-        activated=1
-        echo "[submit] activated env via micromamba: $ENV_NAME"
-    else
-        echo "[submit] WARN: micromamba activate '$ENV_NAME' failed; trying mamba/conda"
-    fi
-fi
-
-# 4) mamba fallback.
-if [[ $activated -eq 0 ]] && command -v mamba >/dev/null 2>&1; then
-    eval "$(mamba shell hook -s bash 2>/dev/null)" || true
-    if mamba activate "$ENV_NAME" 2>/dev/null; then
-        activated=1
-        echo "[submit] activated env via mamba: $ENV_NAME"
-    fi
-fi
-
-# 5) conda fallback.
-if [[ $activated -eq 0 ]] && command -v conda >/dev/null 2>&1; then
-    # shellcheck disable=SC1091
-    source "$(conda info --base 2>/dev/null)/etc/profile.d/conda.sh" 2>/dev/null || true
-    if conda activate "$ENV_NAME" 2>/dev/null; then
-        activated=1
-        echo "[submit] activated env via conda: $ENV_NAME"
-    fi
-fi
-
-if [[ $activated -eq 0 ]]; then
-    echo "[submit] ERROR: could not activate env '$ENV_NAME'." >&2
-    echo "[submit]   Discovered tools:" >&2
-    echo "[submit]     micromamba: $(command -v micromamba 2>/dev/null || echo 'NOT FOUND')" >&2
-    echo "[submit]     mamba:      $(command -v mamba      2>/dev/null || echo 'NOT FOUND')" >&2
-    echo "[submit]     conda:      $(command -v conda      2>/dev/null || echo 'NOT FOUND')" >&2
-    echo "[submit]     MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX" >&2
-    echo "[submit]   Available envs (best effort):" >&2
-    micromamba env list 2>/dev/null || true
-    echo "[submit]   Override env name: --env-name your_env  OR  ENV_NAME=your_env ./scripts/submit_he_registration.sh ..." >&2
+eval "$("$MICROMAMBA_BIN" shell hook --shell bash)"
+if ! micromamba activate "$HEREG_ENV_PREFIX"; then
+    echo "[submit] ERROR: micromamba activate failed for prefix: $HEREG_ENV_PREFIX" >&2
+    echo "[submit]   Re-run scripts/write-env-config.sh to verify/regenerate env.local.conf." >&2
     exit 1
 fi
+
 # Verify python is the env's python, not the system one.
+echo "[submit] env prefix: $HEREG_ENV_PREFIX"
 echo "[submit] which python: $(command -v python)"
 echo "[submit] which hexenium: $(command -v hexenium 2>/dev/null || echo 'NOT FOUND — did you `pip install -e .` inside the env?')"
 echo "[submit] CONDA_PREFIX: ${CONDA_PREFIX:-unset}"

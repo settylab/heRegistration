@@ -1,5 +1,13 @@
-#!/bin/bash -l
+#!/usr/bin/env bash
 # ---------------------------------------------------------------------
+# NOT a login shell (`bash -l`): a login shell implicitly sources
+# ~/.bash_profile / ~/.bashrc via `$HOME` at process startup, before
+# this script's own body runs — see scripts/lib/env_config.sh for why
+# that class of bug is exactly what this pipeline can no longer risk.
+# Env activation uses the resolved absolute values in
+# scripts/env.local.conf instead — see the "Env activation" section
+# below.
+#
 # Slurm submission wrapper: convert an Olympus VSI (or any BioFormats-
 # readable WSI format) to pyramidal OME-TIFF using bioformats2raw +
 # raw2ometiff. Independent of the hexenium pipeline — the produced
@@ -28,9 +36,17 @@
 #                                    # (Olympus 40x lives in s2 usually)
 #       [--max-workers 4]
 #
-# Environment variables (fallbacks; CLI flags win):
-#   ENV_NAME       — conda/micromamba env holding bioformats2raw +
-#                    raw2ometiff + libblosc. Default: heRegistration.
+# Env activation: always by the absolute prefix pinned in
+# scripts/env.local.conf (scripts/write-env-config.sh) — never by name,
+# never re-derived from $HOME. See scripts/lib/env_config.sh for why.
+# --env-name / $ENV_NAME are still parsed but only WARN if given; they
+# no longer select which env is activated.
+#
+# BFTOOLS_ROOT / LIBBLOSC_DIR are normally set via scripts/env.local.conf
+# (scripts/write-env-config.sh --bftools-root/--libblosc-dir), which is
+# sourced before this section and so takes precedence; exporting them
+# directly still works as a one-off override when env.local.conf leaves
+# them unset:
 #   BFTOOLS_ROOT   — directory containing extracted Glencoe zips
 #                    (bioformats2raw-*/bin/bioformats2raw +
 #                    raw2ometiff-*/bin/raw2ometiff). Only consulted
@@ -39,7 +55,7 @@
 #                    doesn't ship one (raw2ometiff needs it via JNA).
 #
 # Prerequisites (install ONCE per env):
-#   micromamba install -n <ENV_NAME> -c conda-forge \
+#   micromamba install -p <env-prefix> -c conda-forge \
 #       bioformats2raw raw2ometiff c-blosc -y
 #
 # If conda-forge is unreachable, drop the Glencoe zips into a scratch
@@ -128,41 +144,30 @@ for ((i=0; i<${#args[@]}; i++)); do
     esac
 done
 
-ENV_NAME="${ENV_NAME_CLI:-${ENV_NAME:-heRegistration}}"
-
-# ---- Env activation (same pattern as submit_he_registration.sh) -----
-if [[ -f "$HOME/.bashrc" ]]; then
-    set +e; set +u
-    # shellcheck disable=SC1091
-    source "$HOME/.bashrc"
-    set -e; set -u
-fi
-: "${MAMBA_ROOT_PREFIX:=$HOME/micromamba}"
-export MAMBA_ROOT_PREFIX
-if ! command -v micromamba >/dev/null 2>&1; then
-    for bindir in "$MAMBA_ROOT_PREFIX/bin" "$HOME/.local/bin"; do
-        if [[ -x "$bindir/micromamba" ]]; then
-            export PATH="$bindir:$PATH"; break
-        fi
-    done
-fi
-if [[ "$(type -t micromamba 2>/dev/null)" != "function" ]]; then
-    for hook in "$MAMBA_ROOT_PREFIX/etc/profile.d/micromamba.sh" \
-                "$HOME/micromamba/etc/profile.d/micromamba.sh"; do
-        [[ -f "$hook" ]] && { source "$hook"; break; }
-    done
-fi
-if ! micromamba activate "$ENV_NAME" 2>/dev/null; then
-    if command -v conda >/dev/null 2>&1; then
-        source "$(conda info --base)/etc/profile.d/conda.sh"
-        conda activate "$ENV_NAME"
-    else
-        echo "ERROR: could not activate env '$ENV_NAME'." >&2
-        exit 1
-    fi
+if [[ -n "$ENV_NAME_CLI" || -n "${ENV_NAME:-}" ]]; then
+    echo "[vsi2ometiff] WARN: --env-name/\$ENV_NAME ('${ENV_NAME_CLI:-${ENV_NAME:-}}') is ignored." >&2
+    echo "[vsi2ometiff]   Activation is now always by the absolute prefix pinned in" >&2
+    echo "[vsi2ometiff]   scripts/env.local.conf. Re-run scripts/write-env-config.sh" >&2
+    echo "[vsi2ometiff]   --env-prefix <path> to point at a different env." >&2
 fi
 
-echo "[vsi2ometiff] env activated: $ENV_NAME (CONDA_PREFIX=$CONDA_PREFIX)"
+# ---- Env activation ---------------------------------------------------
+# Resolved from scripts/env.local.conf, NEVER re-derived from `$HOME`
+# here. See scripts/lib/env_config.sh for the full rationale and
+# scripts/submit_he_registration.sh for the identical pattern.
+# Activation is by absolute PREFIX, never by name.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/env_config.sh
+source "$SCRIPT_DIR/lib/env_config.sh"
+
+eval "$("$MICROMAMBA_BIN" shell hook --shell bash)"
+if ! micromamba activate "$HEREG_ENV_PREFIX"; then
+    echo "ERROR: micromamba activate failed for prefix: $HEREG_ENV_PREFIX" >&2
+    echo "  Re-run scripts/write-env-config.sh to verify/regenerate env.local.conf." >&2
+    exit 1
+fi
+
+echo "[vsi2ometiff] env activated: $HEREG_ENV_PREFIX (CONDA_PREFIX=$CONDA_PREFIX)"
 echo "[vsi2ometiff] python:        $(command -v python)"
 
 # ---- Locate the bftools binaries + libblosc -------------------------
@@ -185,9 +190,9 @@ fi
 if [[ -z "$B2R" || -z "$R2O" ]]; then
     echo "ERROR: bioformats2raw / raw2ometiff not on PATH." >&2
     echo "  Install once with:" >&2
-    echo "    micromamba install -n $ENV_NAME -c conda-forge \\" >&2
+    echo "    micromamba install -p $HEREG_ENV_PREFIX -c conda-forge \\" >&2
     echo "        bioformats2raw raw2ometiff c-blosc -y" >&2
-    echo "  Or export BFTOOLS_ROOT=/path/to/extracted/zips." >&2
+    echo "  Or set BFTOOLS_ROOT via scripts/write-env-config.sh --bftools-root." >&2
     exit 1
 fi
 echo "[vsi2ometiff] bioformats2raw: $B2R ($($B2R --version 2>&1 | grep '^Version' | head -1))"
