@@ -787,12 +787,17 @@ def run_celltyping(
 ) -> dict:
     """Run cell-typing + write four GeoJSONs + a combined parquet.
 
-    ``xenium_h5ad`` (query) and ``proseg_purified_h5ad`` (source) drive
-    the NN mapping. Both are optional at this level, and at the
-    pipeline level too — ``pipeline.py`` does not require or validate
-    either before calling this function (its former auto-derive/require
-    helper was removed; see the comment at its celltype call site). If
-    neither is set, cells go out with ``classification=UNLABELED``.
+    ``xenium_h5ad`` (query) and ``proseg_purified_h5ad`` (source)
+    together drive the legacy NN mapping — but only when BOTH are set.
+    With only ``xenium_h5ad`` set (the default, ranger-direct), labels
+    come straight off its ``.obs[<celltype_col>]`` instead — no NN. With
+    only ``proseg_purified_h5ad`` set, or neither set, cells go out with
+    ``classification=UNLABELED``. All three cases are optional at this
+    level, and at the pipeline level too — ``pipeline.py`` does not
+    require or validate either argument before calling this function
+    (its former auto-derive/require helper was removed; see the comment
+    at its celltype call site). See the source-mode routing comment
+    below for the exact branch logic.
 
     ``out_dir`` is the layout-computed
     ``<output_root_he>/celltyped/<he_job_id>/`` folder (caller resolves

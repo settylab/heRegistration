@@ -4,8 +4,11 @@
 
 # ----- I/O ----------------------------------------------------------
 # Three invocation modes:
-#   * standalone            — sample_id + he_path + xenium_bundle + output_root
-#                             (+ proseg_purified_h5ad for the celltype stage).
+#   * standalone            — sample_id + he_path + xenium_bundle + output_root.
+#                             Neither xenium_h5ad nor proseg_purified_h5ad is
+#                             enforced for the celltype stage -- omitting both
+#                             falls through to an UNLABELED fallback rather
+#                             than erroring (see "Cell-type annotation" below).
 #   * integrated-by-run-id  — same, plus run_id. Derives the xenium h5ad from
 #                             <output_root>/<sample>/<sample>_<run_id>/spatial_adata/
 #                             <sample>_xenium_ranger.h5ad and colocates outputs under
@@ -22,8 +25,11 @@ xenium_bundle: null              # REQUIRED on CLI: dir holding morphology_focus
 # becomes the celltype QUERY side. Leave null for standalone.
 xenium_h5ad: null
 # The upstream proseg_purified h5ad. Its .obs carries the celltype
-# labels + centroids that get NN-mapped onto every xenium cell.
-# REQUIRED for the celltype stage.
+# labels + centroids that get NN-mapped onto every xenium cell -- but
+# only when xenium_h5ad is ALSO set (the legacy NN path; see
+# "Cell-type annotation" below). NOT required: with neither this nor
+# xenium_h5ad set, celltype falls through to UNLABELED instead of
+# erroring.
 proseg_purified_h5ad: null
 # DAPI / morphology image used as the moving image for registration.
 # If null, derives from <xenium_bundle>/morphology_focus/morphology_focus_0000.ome.tif
@@ -136,13 +142,14 @@ warp:
 # (zero drift risk).
 #
 # Legacy proseg-NN source: pass ``--proseg-purified-h5ad <path>``
-# explicitly to switch to the original nearest-neighbour mapping
-# from ``proseg_purified.h5ad``'s centroids + celltype column onto
-# every xenium cell. Kept for standalone-mode users who don't run
-# xenium-preprocess's rctd-split, or for a fresh NN fit against a
-# custom proseg reference. The pipeline no longer AUTO-derives the
-# proseg path from the run dir (removed on skeptic F1) — the CLI
-# flag is now a real opt-in signal.
+# EXPLICITLY (in addition to ``xenium_h5ad``/``--xenium-h5ad`` --
+# proseg alone does nothing) to switch to the original
+# nearest-neighbour mapping from ``proseg_purified.h5ad``'s centroids
+# + celltype column onto every xenium cell. Kept for standalone-mode
+# users who don't run xenium-preprocess's rctd-split, or for a fresh
+# NN fit against a custom proseg reference. The pipeline no longer
+# AUTO-derives the proseg path from the run dir (removed on skeptic
+# F1) — the CLI flag is now a real opt-in signal.
 #
 # Missing / all-NaN celltype column on the chosen source h5ad falls
 # gracefully to the ``unlabeled`` sentinel (viz palette maps this
