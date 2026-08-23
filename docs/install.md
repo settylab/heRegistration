@@ -31,8 +31,9 @@ cd heRegistration
 ## 2. Create the conda env
 
 The yml intentionally omits a `name:` field; pass one with `-n`.
-`heRegistration` is the name the sbatch wrapper (`ENV_NAME`) defaults
-to — use it unless you have a reason not to.
+`heRegistration` is just a readable convention — the sbatch wrapper no
+longer selects an env by name (see step 8): whatever you call it here,
+you point the wrapper at its resolved prefix explicitly later.
 
 ```bash
 micromamba env create -n heRegistration -f environments/heRegistration.yml
@@ -135,6 +136,76 @@ hexenium run --help
 If any of these errors, check that the active env is the one you
 created (not `base`) and see the Troubleshooting section below.
 
+## 8. Configure Slurm env activation (required before any sbatch submission)
+
+Steps 1-7 get `hexenium` running **interactively**. A separate,
+one-time step is required before `scripts/submit_he_registration.sh` or
+`scripts/submit_vsi_to_ometiff.sh` can run under Slurm at all.
+
+Both sbatch wrappers activate their conda env by an **absolute,
+pre-resolved prefix** — never by name, never by re-deriving anything
+from `$HOME` at job time. (An earlier version sourced `~/.bashrc` and
+searched `$HOME`-relative paths; that caused real jobs to hang with
+0-byte output because the job's `$HOME` didn't match the submitting
+shell's. See `scripts/lib/env_config.sh`'s header comment for the full
+rationale.) The resolved values live in `scripts/env.local.conf` — a
+gitignored, machine-local file — and every sbatch job reads it back at
+job start via `scripts/lib/env_config.sh`. It does not exist yet after
+a fresh clone, so this step is mandatory, not optional.
+
+Generate it with `scripts/write-env-config.sh`:
+
+```bash
+# From the activated env (step 3), resolve its prefix:
+micromamba env list
+# e.g. heRegistration   /home/you/micromamba/envs/heRegistration
+
+scripts/write-env-config.sh --env-prefix /home/you/micromamba/envs/heRegistration
+```
+
+`--micromamba-bin` and `--mamba-root-prefix` auto-detect from the
+current shell if omitted (run this from a shell where `micromamba`
+already works interactively). If you set up VSI support in step 7,
+also pass `--bftools-root`/`--libblosc-dir` here — this is now the
+canonical way to record those two paths (they used to be documented as
+plain `export`s only; see [VSI-input
+prerequisites](#vsi-input-prerequisites-only-if---he-slide-is-a-vsi-file)
+below):
+
+```bash
+scripts/write-env-config.sh \
+    --env-prefix    /home/you/micromamba/envs/heRegistration \
+    --bftools-root  $HOME/opt/bftools \
+    --libblosc-dir  $HOME/micromamba/envs/blosc/lib
+```
+
+Then verify it resolves end-to-end (activates the env, confirms
+`hexenium` is installed, and — unless `--skip-vsi-check` — confirms
+`bioformats2raw`/`raw2ometiff`/`libblosc` are reachable):
+
+```bash
+scripts/env-preflight.sh
+```
+
+**Re-run `write-env-config.sh` whenever the env moves or is recreated**
+— `env.local.conf` pins the prefix that existed at the time you ran it;
+nothing keeps it in sync automatically.
+
+**Why this matters more than a normal install step:** `submit_he_registration.sh`'s
+launcher branch (what runs when you invoke it directly — the part that
+parses flags and calls `sbatch`) never sources `env_config.sh` at all;
+that only happens later, under `sbatch`, once the job actually starts
+on a compute node (`scripts/submit_he_registration.sh:388-390`). So
+skipping this step does **not** make submission fail — you'll see a
+normal `Submitted batch job NNNN` and the command exits 0, and the
+`scripts/env.local.conf`-missing error only surfaces afterward, inside
+that job's own `slurm-<jobid>.err`. If you're about to queue a run and
+step away, run `scripts/env-preflight.sh` first so a bad config fails
+in your terminal, not silently in a log file you have to go find. See
+the README's ["Where Slurm logs
+land"](../README.md#where-slurm-logs-land) for the exact log path per
+invocation mode.
+
 ## Troubleshooting
 
 - **`ResolutionImpossible: valis-wsi 1.1.0 depends on pandas<2.0.0`**
@@ -173,12 +244,21 @@ created (not `base`) and see the Troubleshooting section below.
 - **`hexenium` command not found** after step 5 succeeds. The wrong
   env is active — `which hexenium` and re-run `micromamba activate
   heRegistration`.
-- **Sbatch job fails at env activation** with "environment
-  `heRegistration` not found". You created the env under a different
-  name in step 2. Either recreate as `heRegistration`, or pass the
-  name to the sbatch wrapper: `./scripts/submit_he_registration.sh
-  --env-name <your-env-name> …` (or export `ENV_NAME=<your-env-name>`
-  in your shell).
+- **Interactive `micromamba activate heRegistration` fails** with
+  "environment not found". You created the env under a different name
+  in step 2 — activate it under that name instead, or recreate it as
+  `heRegistration`.
+- **Sbatch job fails** (check `slurm-<jobid>.err` under the run's logs
+  dir — see step 8 for why this doesn't show up on your terminal) with
+  `error: scripts/env.local.conf not found` or `MICROMAMBA_BIN ... is
+  not an executable file` or similar. You haven't done step 8 yet, or
+  `env.local.conf` still points at a prefix that no longer exists (env
+  recreated or moved). Re-run `scripts/write-env-config.sh --env-prefix
+  <path>` and verify with `scripts/env-preflight.sh`.
+  **`--env-name <name>` / `ENV_NAME=<name>` do NOT fix this** — both
+  wrappers still parse them (so old invocations don't hit an "unknown
+  flag" error) but only emit a WARN; activation is always by the
+  absolute prefix pinned in `scripts/env.local.conf`.
 
 If none of these match, `pip install --no-deps -r
 environments/heRegistration-requirements.txt -v` prints per-package
@@ -359,9 +439,20 @@ The launcher discovers the tools through two env vars:
   imagecodecs-vendored copy is not on the discoverable
   path.
 
-Set both before running `submit_he_registration.sh`. The
-launcher (`scripts/submit_vsi_to_ometiff.sh`) prepends
-`$BFTOOLS_ROOT/…/bin/` onto `PATH` and `$LIBBLOSC_DIR`
+**Canonical way to set both: `scripts/write-env-config.sh
+--bftools-root <dir> --libblosc-dir <dir>`** (step 8 above) — this
+records the resolved absolute paths into `scripts/env.local.conf`,
+which both sbatch wrappers read at job start. A plain ambient `export`
+(below) still works as a fallback since `env_config.sh` never unsets a
+pre-existing value, but it isn't the recommended path anymore: the
+`export`-only approach is exactly the kind of `$HOME`/shell-session-
+relative state this fix moved away from, even though these two specific
+vars are absolute paths and so aren't unsafe the way the old
+`$HOME`-relative micromamba lookup was.
+
+Set both before running `submit_he_registration.sh` if you're using the
+ambient-export fallback. The launcher (`scripts/submit_vsi_to_ometiff.sh`)
+prepends `$BFTOOLS_ROOT/…/bin/` onto `PATH` and `$LIBBLOSC_DIR`
 onto `LD_LIBRARY_PATH` automatically — you don't need to
 manage those two variables yourself.
 

@@ -200,8 +200,9 @@ git clone https://github.com/settylab/heRegistration.git
 cd heRegistration
 
 # 2. Create the conda env from the pinned spec.
-#    Use `-n heRegistration` so the sbatch wrapper's ENV_NAME
-#    default finds it without further overrides.
+#    `heRegistration` is just a readable convention — the sbatch
+#    wrapper activates envs by resolved absolute prefix (step 8 in
+#    docs/install.md), not by name.
 micromamba env create -n heRegistration -f environments/heRegistration.yml
 # or: conda env create -n heRegistration -f environments/heRegistration.yml
 
@@ -240,6 +241,17 @@ unzip raw2ometiff-0.9.0.zip
 # Point the launcher at the extracted zips + a libblosc:
 export BFTOOLS_ROOT=$HOME/opt/bftools
 export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
+
+# 8. REQUIRED before any sbatch submission (steps 1-7 only cover
+#    interactive use). Resolve the env's absolute prefix and record it
+#    (+ the two VSI paths above, if you did step 7) so every Slurm job
+#    activates by prefix, never by name or $HOME-relative lookup:
+micromamba env list   # find heRegistration's absolute prefix
+scripts/write-env-config.sh \
+    --env-prefix   /path/to/micromamba/envs/heRegistration \
+    --bftools-root $BFTOOLS_ROOT \
+    --libblosc-dir $LIBBLOSC_DIR
+scripts/env-preflight.sh   # verify it resolves end-to-end
 ```
 
 If any verification line errors, jump to
@@ -250,6 +262,12 @@ If you don't already have a conda env with
 `LIBBLOSC_DIR`), [`docs/install.md`](docs/install.md) has
 a minimal `blosc`-only env recipe under
 `### VSI-input prerequisites`.
+
+Step 8 is not optional if you plan to submit anything via
+`scripts/submit_he_registration.sh` — see
+[`docs/install.md`](docs/install.md#8-configure-slurm-env-activation-required-before-any-sbatch-submission)
+for why skipping it produces a submission that *looks* successful and
+fails later, silently, inside the job.
 
 ### Advanced install topics
 
@@ -269,6 +287,9 @@ For depth on installation edge cases, see
 - [Env drift & recovery](docs/install.md#env-drift--recovery)
   — `--force-reinstall` gotchas around the pinned
   numpy / xarray / fastcluster / opencv-contrib layer.
+- [Configure Slurm env activation](docs/install.md#8-configure-slurm-env-activation-required-before-any-sbatch-submission)
+  — the required post-install step (`write-env-config.sh` +
+  `env-preflight.sh`) before any `sbatch` submission works.
 
 ## Quickstart
 
@@ -341,7 +362,9 @@ If the `celltype` stage is in `--stages`, pass `--xenium-h5ad`
 so hexenium can read labels directly off its `.obs[<col>]`
 (the ranger-direct default). Add `--proseg-purified-h5ad`
 only if you want to opt in to the legacy proseg-NN mapping
-instead.
+instead. Neither flag is enforced — omitting both doesn't error,
+it just labels every cell `unlabeled` (with a log line), so a
+typo'd or missing path here fails silently rather than loudly.
 
 ### 2. Integrated-by-run-id
 
@@ -629,7 +652,7 @@ The knobs most runs actually touch:
 | `--use-he-deconvolution` / `registration.use_he_deconvolution` | `true` | Macenko-style H&E stain deconvolution before registration. Override with `false` on faint-hematoxylin samples. |
 | `--dapi-path` / `dapi_path` | derived from `xenium_bundle` | Pass explicitly for multichannel bundles (`morphology_focus/ch0000_dapi.ome.tif`). |
 | `--proseg-purified-h5ad` / `proseg_purified_h5ad` | (unset) | **Legacy proseg-NN mode opt-in.** Explicit → celltype falls back to the historic NN-mapping code path. Not needed in the standard xenium-preprocess → hexenium flow (default ranger-direct). |
-| `--xenium-h5ad` / `xenium_h5ad` | integrated modes: auto; standalone: required for `celltype` | Query xenium h5ad. Default source for celltype labels (read directly from `.obs[<celltype_col>]`). Also the identity source in integrated-by-h5ad mode. |
+| `--xenium-h5ad` / `xenium_h5ad` | integrated modes: auto; standalone: `(unset)` | Query xenium h5ad. Default source for celltype labels (read directly from `.obs[<celltype_col>]`). Also the identity source in integrated-by-h5ad mode. Not enforced in standalone mode — if `celltype` is in `--stages` and neither this nor `--proseg-purified-h5ad` is set, every cell is labeled `unlabeled` (logged, not an error). |
 | `--celltype-col` / `celltype.celltype_col` | `celltype` | Column on the ranger h5ad (or proseg h5ad in legacy mode) that carries per-cell labels. `auto` walks the precedence `celltype > first_type > primary_cell_type > celltype_updated`. Missing / all-NaN → `unlabeled` fallback. |
 | `--id-col` / `celltype.id_col` | `auto` | Force a specific xenium-side id column. `__index__` reads from `.obs.index`. |
 | `--nn-k` / `celltype.nn_k` | `1` | Neighbours per query in the proseg → xenium NN mapping. |
@@ -723,34 +746,73 @@ Call:
     --he-slide      /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
     --xenium-bundle /data/SAMPLE1/xenium/output-XETG.../ \
     [--stages       register warp celltype viz] \
-    [--env-name     my-custom-env] \
     [--force-rerun]
 ```
 
 `OUTPUT_ROOT=/data/xenium_runs` in your env is a fallback for
-`--output-root`. The conda env name defaults to `heRegistration` and can
-be overridden two ways — `--env-name my-custom-env` on the CLI (wins) or
-`ENV_NAME=my-custom-env` in the environment. Example:
+`--output-root`.
 
-```bash
-./scripts/submit_he_registration.sh \
-    --sample-id     SAMPLE1 \
-    --run-id        demo_v1 \
-    --output-root   /data/xenium_runs \
-    --he-slide      /data/SAMPLE1/HE/SAMPLE1_he.ome.tif \
-    --xenium-bundle /data/SAMPLE1/xenium/output-XETG.../ \
-    --env-name      my-custom-env
-```
+**Env activation is by resolved absolute prefix, never by name.** The
+wrapper does **not** source `~/.bashrc` and has no
+micromamba→mamba→conda fallback chain — an earlier version did, and
+that `$HOME`-relative activation chain is what caused real jobs to hang
+with 0-byte output (see `scripts/lib/env_config.sh`'s header comment).
+It always activates the exact prefix recorded in
+`scripts/env.local.conf`, written once by
+`scripts/write-env-config.sh` — see [`docs/install.md` step
+8](docs/install.md#8-configure-slurm-env-activation-required-before-any-sbatch-submission).
+To point the wrapper at a different env, re-run `scripts/write-env-config.sh
+--env-prefix /path/to/other/env` — there is no per-invocation flag for
+this anymore. `--env-name` / `ENV_NAME` are still parsed (so old
+invocations don't hit an "unknown flag" error) but now only emit a WARN
+and change nothing.
 
-The wrapper sources `~/.bashrc` and has a micromamba → mamba → conda
-activation fallback chain so it works on any setup that has one of those
-tools available.
+**A misconfigured environment does not block submission — it fails
+later, silently, inside the job.** `submit_he_registration.sh`'s
+launcher branch (`scripts/submit_he_registration.sh:101-333` — the part
+that runs when you invoke the script directly) parses flags and calls
+`sbatch`/`scontrol release`; it never sources
+`scripts/lib/env_config.sh`. That only happens in the **under-sbatch**
+branch (`scripts/submit_he_registration.sh:388-390`), once the job
+actually starts running on a compute node. So if `scripts/env.local.conf`
+is missing or stale, `./scripts/submit_he_registration.sh ...` still
+prints a normal `Submitted batch job NNNN` and exits `0` — the failure
+only shows up afterward in that job's own `slurm-<jobid>.err`. If
+you're queueing a run and stepping away, run `scripts/env-preflight.sh`
+first so a bad config fails in your terminal instead.
+
+### Where Slurm logs land
 
 The wrapper builds the logs dir under either
 `<output_root>/<sample>/<sample>_<run_id>/logs/logs_heRegistration/`
-(integrated) or `<output_root>/<sample>/logs/` (standalone), with a leaf
-name `<sample>_<jobid>_<stages>` — so re-runs at the same job id don't
-clobber each other's logs.
+(integrated — `submit_he_registration.sh:302`) or
+`<output_root>/<sample>/logs/` (standalone —
+`submit_he_registration.sh:305`), with a leaf directory
+`<sample>_<jobid>_<stages>` (`:307`, `:324`) — so re-runs at the same
+job id don't clobber each other's logs. Slurm's own `.out`/`.err` land
+inside that leaf as `slurm-<jobid>.out` / `slurm-<jobid>.err`
+(`:313-314`). Concretely, for an integrated run:
+
+```
+<output_root>/<sample>/<sample>_<run_id>/logs/logs_heRegistration/<sample>_<jobid>_<stages>/slurm-<jobid>.{out,err}
+```
+
+**Integrated-by-h5ad is the one mode this wrapper doesn't specially
+route.** The launcher branch has no `--xenium-h5ad` handling at all,
+and still hard-requires `--output-root` + `--sample-id` to submit
+(`:128-137`) even though `hexenium run --xenium-h5ad ...` itself needs
+neither — identity and output location come from the h5ad's `.uns` (see
+[Invocation modes](#invocation-modes) above). In practice this mode is
+more often driven with a direct `sbatch`/`sbatch --wrap` call instead of
+this wrapper (see "Direct `sbatch --wrap`" below); in that case Slurm's
+own default applies — `slurm-<jobid>.out`/`.err` land in the submitting
+shell's `cwd`, wherever that is (commonly the xenium run directory
+itself, if that's what an upstream pipeline `cd`s into before
+submitting). If you do drive h5ad-mode through
+`submit_he_registration.sh`, you still need `--output-root`/
+`--sample-id`/`--run-id` to satisfy the launcher, and the logs land per
+the integrated/standalone rule above — not automatically under the
+h5ad's own xenium run directory.
 
 **Direct `sbatch --wrap`** is also fine when you want to override the
 resource envelope per-run:
