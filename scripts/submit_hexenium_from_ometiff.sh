@@ -1,4 +1,4 @@
-#!/bin/bash -l
+#!/usr/bin/env bash
 # ---------------------------------------------------------------------
 # Slurm submission wrapper: run hexenium (register + warp + celltype +
 # viz) on a pre-converted OME-TIFF — the "Path B" second step.
@@ -6,6 +6,16 @@
 # beyond the OME-TIFF file itself, so you can rerun this stage as many
 # times as you like (different modes, different celltype sources, etc.)
 # without re-running the conversion.
+#
+# NOT a login shell (`bash -l`): this script does no env activation of
+# its own — it only parses `--he-ometiff`/`--stages` and `exec`s into
+# `submit_he_registration.sh` (which re-execs under that file's own
+# non-login shebang and does the actual activation via
+# scripts/lib/env_config.sh). So `-l` here can't reproduce the
+# $HOME-relative-activation hang env_config.sh exists to eliminate. It's
+# still removed for consistency with the other two wrappers and to
+# avoid bash's own login-shell startup (sourcing /etc/profile +
+# ~/.bash_profile) running before line 1 of this script's body.
 #
 # When to use this instead of `submit_he_registration.sh` with
 # `--stages he_preprocess register warp celltype viz`:
@@ -31,7 +41,6 @@
 #       --xenium-bundle /path/to/output-XETG... \
 #       --dapi-path   /path/to/output-XETG.../morphology_focus/morphology_focus_0000.ome.tif \
 #       [--proseg-purified-h5ad /path/to/proseg_purified.h5ad] \
-#       [--env-name   heRegistration] \
 #       [--stages     register warp celltype viz] \
 #       [--set-default-on-success] \
 #       [<any-other-hexenium-flag>...]
@@ -44,9 +53,14 @@
 # here too.
 #
 # Environment variables (fallbacks; CLI flags win):
-#   ENV_NAME     — conda/micromamba env with hexenium installed.
-#                  Default: heRegistration.
 #   OUTPUT_ROOT  — fallback for --output-root.
+#
+# Env activation is entirely submit_he_registration.sh's concern (by
+# resolved absolute prefix, via scripts/env.local.conf — see
+# scripts/lib/env_config.sh). --env-name / $ENV_NAME are still parsed
+# by that script for backward compatibility but only WARN; they don't
+# select an env. Re-run scripts/write-env-config.sh --env-prefix <path>
+# to point at a different env.
 # ---------------------------------------------------------------------
 
 set -euo pipefail
@@ -95,7 +109,7 @@ if [[ -z "$_ometiff" ]]; then
     echo "      --he-ometiff <path.ome.tif> --sample-id <name> \\" >&2
     echo "      --run-id <id> --output-root <path> \\" >&2
     echo "      --xenium-bundle <path> [--dapi-path <path>] \\" >&2
-    echo "      [--proseg-purified-h5ad <path>] [--env-name <env>] \\" >&2
+    echo "      [--proseg-purified-h5ad <path>] \\" >&2
     echo "      [--stages register warp celltype viz]" >&2
     exit 2
 fi
