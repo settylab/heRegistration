@@ -781,10 +781,11 @@ def run_celltyping(
     """Run cell-typing + write four GeoJSONs + a combined parquet.
 
     ``xenium_h5ad`` (query) and ``proseg_purified_h5ad`` (source) drive
-    the NN mapping. Both are optional at this level — if either is None,
-    cells go out with ``classification="Unclassified"``. The
-    pipeline-level ``pipeline.py`` treats them as effectively required
-    (surfaces a clear error before reaching this function).
+    the NN mapping. Both are optional at this level, and at the
+    pipeline level too — ``pipeline.py`` does not require or validate
+    either before calling this function (its former auto-derive/require
+    helper was removed; see the comment at its celltype call site). If
+    neither is set, cells go out with ``classification=UNLABELED``.
 
     ``out_dir`` is the layout-computed
     ``<output_root_he>/celltyped/<he_job_id>/`` folder (caller resolves

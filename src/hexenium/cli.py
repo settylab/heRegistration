@@ -6,8 +6,12 @@ pyproject.toml.
 Three invocation modes:
 
 * **standalone** — ``--sample-id`` + ``--he-path`` + ``--xenium-bundle`` +
-  ``--output-root`` (+ ``--proseg-purified-h5ad`` for the celltype
-  stage). Outputs land at ``<output_root>/<sample_id>/{...}``.
+  ``--output-root``. Outputs land at ``<output_root>/<sample_id>/{...}``.
+  Neither ``--xenium-h5ad`` nor ``--proseg-purified-h5ad`` is enforced
+  for the celltype stage — omitting both labels every cell
+  ``UNLABELED`` and the run proceeds; pass ``--xenium-h5ad`` for the
+  ranger-direct default, or add ``--proseg-purified-h5ad`` for the
+  legacy NN-mapping path.
 
 * **integrated-by-run-id** — add ``--run-id`` on top of the standalone
   set. Derives the xenium h5ad path from the upstream layout
@@ -86,7 +90,9 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                         "Auto-derived from <xenium_run_dir>/spatial_adata/"
                         "<sample>_proseg_purified.h5ad when unset AND either "
                         "--xenium-h5ad or --run-id is passed (integrated modes). "
-                        "Required in standalone mode when celltype is in --stages.")
+                        "Not required in standalone mode: if celltype is in "
+                        "--stages and neither this nor --xenium-h5ad is set, "
+                        "every cell is labeled UNLABELED (logged, not an error).")
     p.add_argument("--dapi-path", type=Path, default=None,
                    help="Full path to the DAPI/morphology image to register against. "
                         "If omitted, derives from <xenium_bundle>/morphology_focus/"
