@@ -28,3 +28,7 @@ scratch/
 # Slurm logs
 slurm-*.out
 logs/
+
+# Machine-local, resolved-absolute env config (scripts/write-env-config.sh).
+# See scripts/lib/env_config.sh for why this must never be committed.
+scripts/env.local.conf
