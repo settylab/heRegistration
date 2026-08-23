@@ -162,9 +162,10 @@ hexenium set-default-run \
 The `celltype` stage assigns a cell-type label to every
 warped Xenium cell. The default (**ranger-direct**) reads
 labels from `--xenium-h5ad`'s `.obs["celltype"]`; the
-legacy path (`--proseg-purified-h5ad`) does spatial
-NN-mapping from a proseg h5ad. Missing / empty column →
-`unlabeled` fallback.
+legacy path (`--proseg-purified-h5ad`, passed **in addition
+to** `--xenium-h5ad`) does spatial NN-mapping from a proseg
+h5ad instead. Missing / empty column, or neither h5ad flag
+set → `unlabeled` fallback.
 
 See the [`celltype` stage docs](#celltype--assign-cell-type-labels-to-warped-polygons)
 for source-mode details, `--celltype-col` overrides,
@@ -237,25 +238,39 @@ wget https://github.com/glencoesoftware/bioformats2raw/releases/download/v0.12.1
 wget https://github.com/glencoesoftware/raw2ometiff/releases/download/v0.9.0/raw2ometiff-0.9.0.zip
 unzip bioformats2raw-0.12.1.zip
 unzip raw2ometiff-0.9.0.zip
+```
 
-# Point the launcher at the extracted zips + a libblosc:
-export BFTOOLS_ROOT=$HOME/opt/bftools
-export LIBBLOSC_DIR=$HOME/micromamba/envs/<any-env-with-blosc>/lib
+If any verification line in step 6 errors, jump to
+[Troubleshooting](#troubleshooting) below.
 
-# 8. REQUIRED before any sbatch submission (steps 1-7 only cover
-#    interactive use). Resolve the env's absolute prefix and record it
-#    (+ the two VSI paths above, if you did step 7) so every Slurm job
-#    activates by prefix, never by name or $HOME-relative lookup:
+**8. REQUIRED before any sbatch submission** — steps 1-7 only cover
+interactive use. Run this in **any** shell, even a brand new one (it
+does not depend on step 7's shell state — see the warning below):
+
+```bash
 micromamba env list   # find heRegistration's absolute prefix
-scripts/write-env-config.sh \
-    --env-prefix   /path/to/micromamba/envs/heRegistration \
-    --bftools-root $BFTOOLS_ROOT \
-    --libblosc-dir $LIBBLOSC_DIR
+scripts/write-env-config.sh --env-prefix /path/to/micromamba/envs/heRegistration
 scripts/env-preflight.sh   # verify it resolves end-to-end
 ```
 
-If any verification line errors, jump to
-[Troubleshooting](#troubleshooting) below.
+If you did step 7 for VSI support, pass those two paths again
+explicitly — **do not reuse `$BFTOOLS_ROOT`/`$LIBBLOSC_DIR` as bare
+shell variables here**: they only exist in the shell session that ran
+step 7, and if that step was skipped (no `.vsi` input — the common
+case) or you're in a fresh terminal, both are unset. An unset,
+unquoted `$VAR` vanishes from the command line entirely rather than
+expanding to an empty string, which silently shifts every argument
+after it — `write-env-config.sh` then reports a confusing "does not
+exist" error for a path you never intended to pass. Use the literal
+paths from step 7 instead:
+
+```bash
+scripts/write-env-config.sh \
+    --env-prefix    /path/to/micromamba/envs/heRegistration \
+    --bftools-root  $HOME/opt/bftools \
+    --libblosc-dir  $HOME/micromamba/envs/blosc/lib
+scripts/env-preflight.sh
+```
 
 If you don't already have a conda env with
 `conda-forge::blosc` installed (needed for
@@ -651,7 +666,7 @@ The knobs most runs actually touch:
 | `--mode` / `registration.mode` | `full_with_micro` | `rigid_only`, `rigid_nonrigid`, or `full_with_micro`. `rigid_only_micro` is invalid — see below. |
 | `--use-he-deconvolution` / `registration.use_he_deconvolution` | `true` | Macenko-style H&E stain deconvolution before registration. Override with `false` on faint-hematoxylin samples. |
 | `--dapi-path` / `dapi_path` | derived from `xenium_bundle` | Pass explicitly for multichannel bundles (`morphology_focus/ch0000_dapi.ome.tif`). |
-| `--proseg-purified-h5ad` / `proseg_purified_h5ad` | (unset) | **Legacy proseg-NN mode opt-in.** Explicit → celltype falls back to the historic NN-mapping code path. Not needed in the standard xenium-preprocess → hexenium flow (default ranger-direct). |
+| `--proseg-purified-h5ad` / `proseg_purified_h5ad` | (unset) | **Legacy proseg-NN mode opt-in.** Explicit, **and only in addition to `--xenium-h5ad`** → celltype uses the historic NN-mapping code path. Set alone (without `--xenium-h5ad`) it does nothing — falls through to the same `unlabeled` fallback as neither flag being set. Not needed in the standard xenium-preprocess → hexenium flow (default ranger-direct). |
 | `--xenium-h5ad` / `xenium_h5ad` | integrated modes: auto; standalone: `(unset)` | Query xenium h5ad. Default source for celltype labels (read directly from `.obs[<celltype_col>]`). Also the identity source in integrated-by-h5ad mode. Not enforced in standalone mode — if `celltype` is in `--stages` and neither this nor `--proseg-purified-h5ad` is set, every cell is labeled `unlabeled` (logged, not an error). |
 | `--celltype-col` / `celltype.celltype_col` | `celltype` | Column on the ranger h5ad (or proseg h5ad in legacy mode) that carries per-cell labels. `auto` walks the precedence `celltype > first_type > primary_cell_type > celltype_updated`. Missing / all-NaN → `unlabeled` fallback. |
 | `--id-col` / `celltype.id_col` | `auto` | Force a specific xenium-side id column. `__index__` reads from `.obs.index`. |

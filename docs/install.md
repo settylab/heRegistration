@@ -179,6 +179,18 @@ scripts/write-env-config.sh \
     --libblosc-dir  $HOME/micromamba/envs/blosc/lib
 ```
 
+These are the literal paths from the [VSI-install
+walkthrough](#vsi-input-prerequisites-only-if---he-slide-is-a-vsi-file)
+below, not `$BFTOOLS_ROOT`/`$LIBBLOSC_DIR` read back from your shell —
+don't substitute those two variable names here. They only exist in the
+shell session that ran that walkthrough's own `export` lines, and are
+unset in any other shell (a fresh terminal, a new SSH session, or if
+you skip VSI setup entirely). An unset, unquoted `$VAR` vanishes from
+the command line rather than expanding to an empty string, silently
+shifting every argument after it into the wrong flag — `write-env-config.sh`
+then reports a confusing "does not exist" error for a path you never
+meant to pass.
+
 Then verify it resolves end-to-end (activates the env, confirms
 `hexenium` is installed, and — unless `--skip-vsi-check` — confirms
 `bioformats2raw`/`raw2ometiff`/`libblosc` are reachable):
