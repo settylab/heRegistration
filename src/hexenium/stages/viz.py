@@ -339,11 +339,13 @@ def run_viz(
     *,
     thumbnail_max_dim: int = 4096,
     dpi: int = 200,
-    cell_alpha: float = 0.3,
+    cell_alpha: float = 0.85,
     nucleus_alpha: float = 0.6,
+    he_alpha: float = 0.5,
+    cell_edge_linewidth: float = 0.1,
     classification_palette: dict | None = None,
     palette_cmap: str = "tab20",
-    render_boundaries: str = "nucleus",
+    render_boundaries: str = "cell",
     force_rerun: bool = False,
     xenium_run_dir: Path | None = None,
 ) -> Path:
@@ -354,6 +356,26 @@ def run_viz(
     ``celltyped_dir`` may point at THIS run's celltype output OR (via
     ``--celltype-run-id``) at an earlier run's — the caller resolves
     that choice from the RunLayout before invoking.
+
+    DEFAULT BEHAVIOUR CHANGE (operator-approved on an MH8 overlay
+    readability review, settylab/msetty-nexus#36): at the previous
+    defaults (``render_boundaries="nucleus"``, sub-pixel unfilled
+    nucleus outlines at typical thumbnail resolutions) cell types were
+    effectively invisible. The new defaults —
+    ``render_boundaries="cell"``, ``cell_alpha=0.85``, ``he_alpha=0.5``,
+    ``cell_edge_linewidth=0.1`` — draw large, opaque, stroked cell
+    polygons over a dimmed H&E background instead. This is a
+    deliberate visual change to every future run's default overlay,
+    not merely an additive opt-in; override any of the four
+    explicitly (or via ``viz.*`` config) to restore the old look.
+
+    ``he_alpha`` dims the H&E background image itself (1.0 = full
+    strength) so cell/nucleus fills read as more prominent against it
+    without touching their own alpha.
+
+    ``cell_edge_linewidth`` draws a solid stroke around cell polygons
+    (0.0 = no stroke) to increase their apparent size when the fill
+    alone is near sub-pixel at low zoom.
     """
     if render_boundaries not in ("cell", "nucleus", "both"):
         raise ValueError(
@@ -442,7 +464,7 @@ def run_viz(
     log(f"[viz] thumbnail {w}×{h}; polygon scale factor = {scale:.5f}")
 
     fig, ax = plt.subplots(figsize=(w / dpi, h / dpi), dpi=dpi)
-    ax.imshow(img, origin="upper")
+    ax.imshow(img, origin="upper", alpha=he_alpha)
 
     def _scaled_xy(poly):
         try:
@@ -473,11 +495,17 @@ def run_viz(
             # which canonicalises labels the same way).
             color = classification_palette.get(label) or classification_palette.get(UNLABELED, list(UNLABELED_RGB))
             rgb = tuple(c / 255 for c in color)
+            if boundary_type == "cell" and cell_edge_linewidth > 0:
+                cell_edge = (*rgb, min(1.0, alpha + 0.3))
+                cell_lw = cell_edge_linewidth
+            else:
+                cell_edge = "none"
+                cell_lw = 0
             pc = PolyCollection(
                 verts,
                 facecolors=(*rgb, alpha) if boundary_type == "cell" else "none",
-                edgecolors=(*rgb, min(1.0, alpha + 0.3)) if boundary_type == "nucleus" else "none",
-                linewidths=0.2 if boundary_type == "nucleus" else 0,
+                edgecolors=(*rgb, min(1.0, alpha + 0.3)) if boundary_type == "nucleus" else cell_edge,
+                linewidths=0.2 if boundary_type == "nucleus" else cell_lw,
             )
             ax.add_collection(pc)
             if label not in seen_labels:

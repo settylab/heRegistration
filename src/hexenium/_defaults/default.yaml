@@ -213,15 +213,30 @@ viz:
   enabled: true
   thumbnail_max_dim: 4096        # downsample H&E to this max dimension for plotting
   dpi: 200
-  cell_alpha: 0.3
+  # cell_alpha/he_alpha/cell_edge_linewidth/render_boundaries below were
+  # changed from their original values (0.3 / 1.0 / 0.0 / nucleus) on an
+  # operator-approved MH8 overlay readability review
+  # (settylab/msetty-nexus#36): at the old defaults, cell types were
+  # effectively invisible (sub-pixel unfilled nucleus outlines at typical
+  # thumbnail resolutions). This is a deliberate default behaviour change,
+  # not an additive opt-in — override any of the four to restore the old
+  # look (cell_alpha: 0.3, he_alpha: 1.0, cell_edge_linewidth: 0.0,
+  # render_boundaries: nucleus).
+  cell_alpha: 0.85
   nucleus_alpha: 0.6
-  # Which boundaries to draw on the overlay. Default is `nucleus` —
-  # nuclei alone give the cleanest read of registration quality against
-  # H&E's hematoxylin-stained nuclei.
-  # `cell`    — only cell polygons (semi-transparent fill).
+  # Opacity of the H&E background image itself (1.0 = full strength).
+  # Lower it to make cell/nucleus fills read as more prominent against a
+  # dimmer H&E, without touching their own alpha.
+  he_alpha: 0.5
+  # Stroke width (points) around cell polygon fills (0.0 = no stroke).
+  # Increases a cell's apparent on-screen size when the fill alone is
+  # near sub-pixel at coarse thumbnail resolutions.
+  cell_edge_linewidth: 0.1
+  # Which boundaries to draw on the overlay.
+  # `cell`    — cell polygons (opaque fill + thin stroke by default).
   # `nucleus` — only nucleus outlines.
   # `both`    — nuclei + cell polygons.
-  render_boundaries: nucleus     # cell | nucleus | both
+  render_boundaries: cell     # cell | nucleus | both
   # classification_palette: OPTIONAL overrides for specific labels. Any
   # celltype that isn't listed here gets a color auto-assigned from
   # `palette_cmap` (see below) at run time — so the viz always colors

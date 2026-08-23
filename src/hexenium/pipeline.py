@@ -613,9 +613,11 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             dpi=v["dpi"],
             cell_alpha=v["cell_alpha"],
             nucleus_alpha=v["nucleus_alpha"],
+            he_alpha=v["he_alpha"],
+            cell_edge_linewidth=v["cell_edge_linewidth"],
             classification_palette=v.get("classification_palette"),
             palette_cmap=v.get("palette_cmap", "tab20"),
-            render_boundaries=v.get("render_boundaries", "nucleus"),
+            render_boundaries=v.get("render_boundaries", "cell"),
             force_rerun=force_rerun,
             # Threaded so viz can inherit the celltype palette from the
             # xenium-preprocess UMAP for the same sample/run — matches
