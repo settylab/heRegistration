@@ -1,28 +1,37 @@
 #!/usr/bin/env bash
-# scripts/create-env.sh — create the micromamba env used by this
-# pipeline, self-verifying that the package cache stayed isolated.
+# scripts/create-env.sh — run any `micromamba` env-creation subcommand
+# (`create`, `env create`, …), self-verifying that the package cache
+# stayed isolated.
 #
 # micromamba's `pkgs_dirs` resolves to `[<root>/pkgs, ~/.mamba/pkgs]`
 # even when `MAMBA_ROOT_PREFIX` is overridden to an isolated location
 # — an undocumented second entry. Nothing errors when this fires: a
 # user who sets MAMBA_ROOT_PREFIX expecting a fully self-contained
 # install can still end up with package-cache state silently written
-# to `~/.mamba/pkgs`. This wraps `micromamba env create` with an
+# to `~/.mamba/pkgs`. This wraps the `micromamba` call with an
 # explicit `CONDA_PKGS_DIRS` override (when MAMBA_ROOT_PREFIX is set)
 # and asserts, after the fact, that `~/.mamba/pkgs` was not touched —
 # the failure mode is silent, so the invariant has to check itself
 # rather than being trusted.
 #
 # If MAMBA_ROOT_PREFIX is NOT set, this is a thin passthrough to
-# `micromamba env create` (the default root already IS ~/.mamba, so
-# there is nothing to isolate and nothing to assert).
+# `micromamba` (the default root already IS ~/.mamba, so there is
+# nothing to isolate and nothing to assert).
+#
+# Deliberately generic (does not hardcode `create` vs `env create`):
+# this repo uses both — `env create -f environments/heRegistration.yml`
+# for the main env, and plain `create -n <name> -c <channel> <pkg>`
+# for the ad-hoc blosc env (docs/install.md "VSI-input prerequisites")
+# — and `env create` does not accept the latter's positional package
+# argument.
 #
 # Usage:
-#   scripts/create-env.sh -n heRegistration -f environments/heRegistration.yml
+#   scripts/create-env.sh env create -n heRegistration -f environments/heRegistration.yml
+#   scripts/create-env.sh create -n blosc -c conda-forge blosc -y
 #   MAMBA_ROOT_PREFIX=/abs/isolated/root scripts/create-env.sh \
-#       -n heRegistration -f environments/heRegistration.yml
+#       env create -n heRegistration -f environments/heRegistration.yml
 #
-# All arguments are passed through to `micromamba env create` verbatim.
+# All arguments are passed through to `micromamba` verbatim.
 
 set -euo pipefail
 
@@ -35,7 +44,7 @@ HOME_PKGS="$HOME/.mamba/pkgs"
 
 if [[ -z "${MAMBA_ROOT_PREFIX:-}" ]]; then
     echo "[create-env] MAMBA_ROOT_PREFIX not set — using micromamba's default root; nothing to isolate."
-    exec micromamba env create "$@"
+    exec micromamba "$@"
 fi
 
 if [[ ! -d "$MAMBA_ROOT_PREFIX" ]]; then
@@ -51,7 +60,7 @@ echo "[create-env] CONDA_PKGS_DIRS=$CONDA_PKGS_DIRS"
 MARKER=$(mktemp)
 trap 'rm -f "$MARKER"' EXIT
 
-micromamba env create "$@"
+micromamba "$@"
 
 if [[ -d "$HOME_PKGS" ]]; then
     TOUCHED=$(find "$HOME_PKGS" -newer "$MARKER" 2>/dev/null || true)

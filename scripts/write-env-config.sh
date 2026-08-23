@@ -15,9 +15,9 @@
 #       [--libblosc-dir     /abs/path/to/env/with/blosc/lib]
 #
 # --env-prefix must already exist (this script records, it does not
-# create, the environment — run `micromamba env create -n heRegistration
-# -f environments/heRegistration.yml` first, then resolve its prefix via
-# `micromamba env list`). --micromamba-bin auto-detects via
+# create, the environment — run `scripts/create-env.sh env create
+# -n heRegistration -f environments/heRegistration.yml` first, then
+# resolve its prefix via `micromamba env list`). --micromamba-bin auto-detects via
 # `command -v micromamba` if not passed. --mamba-root-prefix is DERIVED
 # from --env-prefix if not passed: a micromamba env prefix is, by
 # construction, `<root>/envs/<name>`, so the root is
@@ -71,7 +71,7 @@ done
 
 if [[ ! -d "$ENV_PREFIX" ]]; then
     echo "error: --env-prefix does not exist: $ENV_PREFIX" >&2
-    echo "       Create it first: micromamba env create -n heRegistration -f environments/heRegistration.yml" >&2
+    echo "       Create it first: scripts/create-env.sh env create -n heRegistration -f environments/heRegistration.yml" >&2
     echo "       then resolve its prefix with: micromamba env list" >&2
     exit 3
 fi

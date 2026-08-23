@@ -5,8 +5,11 @@
 # + `pip freeze`).
 #
 # Two-step install (see the README's "Recommended" section):
-#   1. `micromamba env create -f environments/heRegistration.yml` — solves
-#      the conda block below (system libs + scientific-Python core).
+#   1. `scripts/create-env.sh env create -f environments/heRegistration.yml`
+#      — solves the conda block below (system libs + scientific-Python
+#      core). Wraps `micromamba env create` so an isolated
+#      MAMBA_ROOT_PREFIX doesn't leak package-cache state to
+#      ~/.mamba/pkgs — see scripts/create-env.sh for why.
 #   2. `pip install --no-deps -r environments/heRegistration-requirements.txt`
 #      — pins the pip-only overrides (torch/transformers/ultralytics/…
 #      and hest/valis-wsi) at their exact working versions.
@@ -25,7 +28,7 @@
 #
 # Name intentionally omitted so the caller picks the env name at
 # create time:
-#   micromamba env create -n <your-env-name> -f environments/heRegistration.yml
+#   scripts/create-env.sh env create -n <your-env-name> -f environments/heRegistration.yml
 channels:
   - conda-forge
   - bioconda

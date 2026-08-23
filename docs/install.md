@@ -36,16 +36,17 @@ longer selects an env by name (see step 8): whatever you call it here,
 you point the wrapper at its resolved prefix explicitly later.
 
 ```bash
-scripts/create-env.sh -n heRegistration -f environments/heRegistration.yml
+scripts/create-env.sh env create -n heRegistration -f environments/heRegistration.yml
 # or with conda:
 # conda env create -n heRegistration -f environments/heRegistration.yml
 ```
 
-`scripts/create-env.sh` is a thin wrapper around `micromamba env
-create`. If you don't set `MAMBA_ROOT_PREFIX`, it's a plain
-passthrough. If you **do** set `MAMBA_ROOT_PREFIX` to keep this
-install fully isolated (off `$HOME`, for a scratch/test install, or to
-keep multiple installs from sharing state) — e.g.
+`scripts/create-env.sh` is a thin wrapper that runs any `micromamba`
+env-creation subcommand you pass it (`env create`, `create`, …). If
+you don't set `MAMBA_ROOT_PREFIX`, it's a plain passthrough. If you
+**do** set `MAMBA_ROOT_PREFIX` to keep this install fully isolated
+(off `$HOME`, for a scratch/test install, or to keep multiple installs
+from sharing state) — e.g.
 `export MAMBA_ROOT_PREFIX=/abs/path/to/isolated/root` first — the
 wrapper also exports `CONDA_PKGS_DIRS="$MAMBA_ROOT_PREFIX/pkgs"` and
 asserts afterward that `~/.mamba/pkgs` was not touched. Without this,
@@ -54,7 +55,11 @@ micromamba's `pkgs_dirs` silently resolves to
 entry — so an "isolated" install can still quietly write package-cache
 state to `~/.mamba/pkgs` with nothing erroring. A bare
 `micromamba env create` still works exactly as before if you don't
-need isolation.
+need isolation. **Use `scripts/create-env.sh` (not the bare
+`micromamba`/`conda` command) for every env this repo has you create**
+— see also the ad-hoc `blosc` env in [VSI-input
+prerequisites](#vsi-input-prerequisites-only-if---he-slide-is-a-vsi-file)
+below, which uses the same wrapper.
 
 ## 3. Activate
 
@@ -526,7 +531,7 @@ already have one, create a minimal env just for the
 library:
 
 ```bash
-micromamba create -n blosc -c conda-forge blosc -y
+scripts/create-env.sh create -n blosc -c conda-forge blosc -y
 export LIBBLOSC_DIR=$HOME/micromamba/envs/blosc/lib
 ```
 
