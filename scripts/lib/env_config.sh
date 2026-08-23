@@ -27,6 +27,24 @@
 #   MICROMAMBA_BIN     absolute path to the micromamba binary (required)
 #   HEREG_ENV_PREFIX   absolute path to the micromamba env PREFIX, not
 #                       a name (required)
+#   MAMBA_ROOT_PREFIX  absolute path to micromamba's root prefix
+#                       (required). Not the env prefix — this is the
+#                       directory holding `condabin/`, `pkgs/`, etc. that
+#                       micromamba's own shell hook unconditionally
+#                       references (`${MAMBA_ROOT_PREFIX}/condabin` — no
+#                       `:-` default in micromamba's own hook script) the
+#                       moment `eval "$("$MICROMAMBA_BIN" shell hook
+#                       ...)"` runs in a shell that doesn't already have
+#                       CONDA_SHLVL set — true of every fresh Slurm job
+#                       shell. Leaving this ambient (the old code's
+#                       `${MAMBA_ROOT_PREFIX:=$HOME/micromamba}` default
+#                       was unsafe but at least ALWAYS assigned it) means
+#                       the job crashes with "MAMBA_ROOT_PREFIX: unbound
+#                       variable" under `set -u` the instant the hook
+#                       runs — verified directly: `env -u
+#                       MAMBA_ROOT_PREFIX -u CONDA_SHLVL bash -c 'set
+#                       -euo pipefail; eval "$(micromamba shell hook
+#                       --shell bash)"'` reproduces this exact crash.
 #   BFTOOLS_ROOT        absolute path to the extracted Glencoe zips
 #                       (bioformats2raw-*/bin, raw2ometiff-*/bin) — only
 #                       consulted by the VSI-conversion path
@@ -39,9 +57,11 @@
 #
 # Fails loud (exit 1) with a "run the install step" message if:
 #   - scripts/env.local.conf is missing or unreadable
-#   - MICROMAMBA_BIN or HEREG_ENV_PREFIX is missing or empty
+#   - MICROMAMBA_BIN, HEREG_ENV_PREFIX, or MAMBA_ROOT_PREFIX is missing
+#     or empty
 #   - MICROMAMBA_BIN does not point at an executable file
-#   - HEREG_ENV_PREFIX does not point at an existing directory
+#   - HEREG_ENV_PREFIX or MAMBA_ROOT_PREFIX does not point at an
+#     existing directory
 #   - BFTOOLS_ROOT or LIBBLOSC_DIR is SET in the config but empty (a
 #     stale/corrupted entry) — but they may be entirely absent, since
 #     they are optional.
@@ -78,7 +98,7 @@ fi
 # shellcheck source=/dev/null
 source "$ENV_LOCAL_CONF"
 
-for _var in MICROMAMBA_BIN HEREG_ENV_PREFIX; do
+for _var in MICROMAMBA_BIN HEREG_ENV_PREFIX MAMBA_ROOT_PREFIX; do
     if [[ -z "${!_var:-}" ]]; then
         _env_config_fail "scripts/env.local.conf is missing or has an empty '$_var'."
     fi
@@ -91,6 +111,10 @@ fi
 
 if [[ ! -d "$HEREG_ENV_PREFIX" ]]; then
     _env_config_fail "HEREG_ENV_PREFIX in scripts/env.local.conf does not exist: $HEREG_ENV_PREFIX"
+fi
+
+if [[ ! -d "$MAMBA_ROOT_PREFIX" ]]; then
+    _env_config_fail "MAMBA_ROOT_PREFIX in scripts/env.local.conf does not exist: $MAMBA_ROOT_PREFIX"
 fi
 
 # BFTOOLS_ROOT / LIBBLOSC_DIR are OPTIONAL — only the VSI-conversion
@@ -116,7 +140,7 @@ if [[ -n "${LIBBLOSC_DIR:-}" && ! -d "$LIBBLOSC_DIR" ]]; then
     _env_config_fail "LIBBLOSC_DIR in scripts/env.local.conf does not exist: $LIBBLOSC_DIR"
 fi
 
-export MICROMAMBA_BIN HEREG_ENV_PREFIX
+export MICROMAMBA_BIN HEREG_ENV_PREFIX MAMBA_ROOT_PREFIX
 # NOT `[[ -n ... ]] && export ...`: when sourced, this file's exit status
 # is whatever its LAST executed command returned. A false `[[ ]]` as (or
 # driving) the last statement makes `source lib/env_config.sh` itself

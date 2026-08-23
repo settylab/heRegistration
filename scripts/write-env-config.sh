@@ -8,20 +8,30 @@
 #
 # Usage:
 #   scripts/write-env-config.sh \
-#       --env-prefix      /abs/path/to/micromamba/envs/heRegistration \
-#       [--micromamba-bin /abs/path/to/micromamba] \
-#       [--bftools-root   /abs/path/to/extracted/glencoe/zips] \
-#       [--libblosc-dir   /abs/path/to/env/with/blosc/lib]
+#       --env-prefix        /abs/path/to/micromamba/envs/heRegistration \
+#       [--micromamba-bin   /abs/path/to/micromamba] \
+#       [--mamba-root-prefix /abs/path/to/micromamba/root] \
+#       [--bftools-root     /abs/path/to/extracted/glencoe/zips] \
+#       [--libblosc-dir     /abs/path/to/env/with/blosc/lib]
 #
 # --env-prefix must already exist (this script records, it does not
 # create, the environment — run `micromamba env create -n heRegistration
 # -f environments/heRegistration.yml` first, then resolve its prefix via
 # `micromamba env list`). --micromamba-bin auto-detects via
-# `command -v micromamba` if not passed. --bftools-root / --libblosc-dir
-# are OPTIONAL — only needed if you plan to convert .vsi inputs via
-# scripts/submit_vsi_to_ometiff.sh and bioformats2raw/raw2ometiff/
-# libblosc aren't already installed inside --env-prefix (see
-# docs/install.md "VSI-input prerequisites").
+# `command -v micromamba` if not passed. --mamba-root-prefix auto-detects
+# from the CURRENT shell's $MAMBA_ROOT_PREFIX if not passed (i.e. this
+# script must be run from a shell where micromamba already works
+# interactively — the same "resolve once, from a known-good shell" idea
+# as --micromamba-bin's auto-detect). This is NOT --env-prefix: it's
+# micromamba's own root (holds condabin/, pkgs/, etc.) — required
+# because micromamba's shell hook script references
+# `${MAMBA_ROOT_PREFIX}` with no fallback the moment it runs in a shell
+# that doesn't already have CONDA_SHLVL set, which is every fresh Slurm
+# job shell; see scripts/lib/env_config.sh for the reproduction.
+# --bftools-root / --libblosc-dir are OPTIONAL — only needed if you plan
+# to convert .vsi inputs via scripts/submit_vsi_to_ometiff.sh and
+# bioformats2raw/raw2ometiff/libblosc aren't already installed inside
+# --env-prefix (see docs/install.md "VSI-input prerequisites").
 
 set -euo pipefail
 
@@ -30,17 +40,19 @@ OUT="$SCRIPT_DIR/env.local.conf"
 
 ENV_PREFIX=""
 MICROMAMBA_BIN=""
+MAMBA_ROOT_PREFIX_ARG=""
 BFTOOLS_ROOT=""
 LIBBLOSC_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env-prefix)      ENV_PREFIX="$2"; shift 2 ;;
-        --micromamba-bin)  MICROMAMBA_BIN="$2"; shift 2 ;;
-        --bftools-root)    BFTOOLS_ROOT="$2"; shift 2 ;;
-        --libblosc-dir)    LIBBLOSC_DIR="$2"; shift 2 ;;
+        --env-prefix)         ENV_PREFIX="$2"; shift 2 ;;
+        --micromamba-bin)     MICROMAMBA_BIN="$2"; shift 2 ;;
+        --mamba-root-prefix)  MAMBA_ROOT_PREFIX_ARG="$2"; shift 2 ;;
+        --bftools-root)       BFTOOLS_ROOT="$2"; shift 2 ;;
+        --libblosc-dir)       LIBBLOSC_DIR="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,22p' "$0"; exit 0 ;;
+            sed -n '2,34p' "$0"; exit 0 ;;
         *)
             echo "error: unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -69,6 +81,21 @@ fi
 # Canonicalize (command -v can return a relative-looking path on some shells).
 MICROMAMBA_BIN=$(cd "$(dirname "$MICROMAMBA_BIN")" && pwd)/$(basename "$MICROMAMBA_BIN")
 
+if [[ -z "$MAMBA_ROOT_PREFIX_ARG" ]]; then
+    MAMBA_ROOT_PREFIX_ARG="${MAMBA_ROOT_PREFIX:-}"
+fi
+if [[ -z "$MAMBA_ROOT_PREFIX_ARG" ]]; then
+    echo "error: --mamba-root-prefix not given and \$MAMBA_ROOT_PREFIX is not set in this shell." >&2
+    echo "       Run this from a shell where micromamba already works interactively" >&2
+    echo "       (so \$MAMBA_ROOT_PREFIX is set), or pass --mamba-root-prefix explicitly." >&2
+    exit 5
+fi
+if [[ ! -d "$MAMBA_ROOT_PREFIX_ARG" ]]; then
+    echo "error: --mamba-root-prefix does not exist: $MAMBA_ROOT_PREFIX_ARG" >&2
+    exit 3
+fi
+MAMBA_ROOT_PREFIX_ARG=$(cd "$MAMBA_ROOT_PREFIX_ARG" && pwd)
+
 if [[ -n "$BFTOOLS_ROOT" ]]; then
     if [[ ! -d "$BFTOOLS_ROOT" ]]; then
         echo "error: --bftools-root does not exist: $BFTOOLS_ROOT" >&2
@@ -91,6 +118,7 @@ fi
     echo "# Do not hand-edit; re-run scripts/write-env-config.sh instead."
     echo "MICROMAMBA_BIN=$MICROMAMBA_BIN"
     echo "HEREG_ENV_PREFIX=$ENV_PREFIX"
+    echo "MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX_ARG"
     [[ -n "$BFTOOLS_ROOT" ]] && echo "BFTOOLS_ROOT=$BFTOOLS_ROOT"
     [[ -n "$LIBBLOSC_DIR" ]] && echo "LIBBLOSC_DIR=$LIBBLOSC_DIR"
 } > "$OUT"

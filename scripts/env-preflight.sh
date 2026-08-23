@@ -37,6 +37,7 @@ source "$SCRIPT_DIR/lib/env_config.sh"
 echo "[env-preflight] scripts/env.local.conf OK:"
 echo "[env-preflight]   MICROMAMBA_BIN=$MICROMAMBA_BIN"
 echo "[env-preflight]   HEREG_ENV_PREFIX=$HEREG_ENV_PREFIX"
+echo "[env-preflight]   MAMBA_ROOT_PREFIX=$MAMBA_ROOT_PREFIX"
 echo "[env-preflight]   BFTOOLS_ROOT=${BFTOOLS_ROOT:-<unset>}"
 echo "[env-preflight]   LIBBLOSC_DIR=${LIBBLOSC_DIR:-<unset>}"
 
