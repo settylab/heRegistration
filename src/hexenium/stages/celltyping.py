@@ -1,17 +1,24 @@
 """Stage 3: assign cell-type labels to warped boundaries + write
 four GeoJSON output files.
 
-Sources of celltype label — inlined NN mapping. Every Xenium cell is
-labelled by nearest-neighbour lookup on the proseg-side centroids.
+Sources of celltype label. The default (ranger-direct) reads labels
+directly off ``xenium_ranger.h5ad``'s ``.obs[<celltype_col>]`` — no NN
+involved. This module's inlined NN mapping is the LEGACY path: it only
+runs when a ``proseg_purified.h5ad`` is passed *in addition to* the
+ranger h5ad (see :func:`run_celltyping`'s source-mode routing). Every
+Xenium cell is labelled by nearest-neighbour lookup on the proseg-side
+centroids only in that legacy path.
 
-  * ``proseg_purified.h5ad`` — SOURCE. Its ``.obs`` carries centroids
-    (``x``/``y``, Xenium µm frame) and a celltype column (``celltype``,
-    ``first_type``, ``primary_cell_type``, or ``celltype_updated`` —
-    auto-detected by precedence).
+  * ``proseg_purified.h5ad`` — SOURCE (legacy path only). Its ``.obs``
+    carries centroids (``x``/``y``, Xenium µm frame) and a celltype
+    column (``celltype``, ``first_type``, ``primary_cell_type``, or
+    ``celltype_updated`` — auto-detected by precedence).
   * ``xenium_ranger.h5ad`` — QUERY. Its ``.obs`` carries the Xenium
     per-cell UUIDs (``cell_id``) and centroids for the ORIGINAL Xenium
-    segmentation. Every Xenium cell gets a celltype label via spatial
-    NN on the proseg centroids (no ID join).
+    segmentation. In the legacy path, every Xenium cell gets a celltype
+    label via spatial NN on the proseg centroids (no ID join); in the
+    default ranger-direct path, labels come straight from this h5ad's
+    own celltype column instead.
 
 Algorithm:
 

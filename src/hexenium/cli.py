@@ -86,7 +86,10 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                         "so the path is derived.")
     p.add_argument("--proseg-purified-h5ad", type=Path, default=None,
                    help="Upstream proseg_purified h5ad. Its .obs carries celltypes "
-                        "+ centroids that get NN-mapped onto every xenium cell. "
+                        "+ centroids that get NN-mapped onto every xenium cell -- "
+                        "but only when --xenium-h5ad is ALSO set; this flag alone "
+                        "(no --xenium-h5ad) falls through to UNLABELED, same as "
+                        "neither being set. "
                         "Auto-derived from <xenium_run_dir>/spatial_adata/"
                         "<sample>_proseg_purified.h5ad when unset AND either "
                         "--xenium-h5ad or --run-id is passed (integrated modes). "
