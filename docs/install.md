@@ -36,10 +36,25 @@ longer selects an env by name (see step 8): whatever you call it here,
 you point the wrapper at its resolved prefix explicitly later.
 
 ```bash
-micromamba env create -n heRegistration -f environments/heRegistration.yml
+scripts/create-env.sh -n heRegistration -f environments/heRegistration.yml
 # or with conda:
 # conda env create -n heRegistration -f environments/heRegistration.yml
 ```
+
+`scripts/create-env.sh` is a thin wrapper around `micromamba env
+create`. If you don't set `MAMBA_ROOT_PREFIX`, it's a plain
+passthrough. If you **do** set `MAMBA_ROOT_PREFIX` to keep this
+install fully isolated (off `$HOME`, for a scratch/test install, or to
+keep multiple installs from sharing state) — e.g.
+`export MAMBA_ROOT_PREFIX=/abs/path/to/isolated/root` first — the
+wrapper also exports `CONDA_PKGS_DIRS="$MAMBA_ROOT_PREFIX/pkgs"` and
+asserts afterward that `~/.mamba/pkgs` was not touched. Without this,
+micromamba's `pkgs_dirs` silently resolves to
+`[$MAMBA_ROOT_PREFIX/pkgs, ~/.mamba/pkgs]` — an undocumented second
+entry — so an "isolated" install can still quietly write package-cache
+state to `~/.mamba/pkgs` with nothing erroring. A bare
+`micromamba env create` still works exactly as before if you don't
+need isolation.
 
 ## 3. Activate
 

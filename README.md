@@ -204,7 +204,10 @@ cd heRegistration
 #    `heRegistration` is just a readable convention — the sbatch
 #    wrapper activates envs by resolved absolute prefix (step 8 in
 #    docs/install.md), not by name.
-micromamba env create -n heRegistration -f environments/heRegistration.yml
+#    scripts/create-env.sh wraps `micromamba env create`; if you set
+#    MAMBA_ROOT_PREFIX for an isolated install it also keeps the
+#    package cache isolated (see docs/install.md § 2).
+scripts/create-env.sh -n heRegistration -f environments/heRegistration.yml
 # or: conda env create -n heRegistration -f environments/heRegistration.yml
 
 # 3. Activate
