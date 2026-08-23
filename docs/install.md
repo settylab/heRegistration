@@ -163,9 +163,19 @@ micromamba env list
 scripts/write-env-config.sh --env-prefix /home/you/micromamba/envs/heRegistration
 ```
 
-`--micromamba-bin` and `--mamba-root-prefix` auto-detect from the
-current shell if omitted (run this from a shell where `micromamba`
-already works interactively). If you set up VSI support in step 7,
+`--micromamba-bin` auto-detects via `command -v micromamba` if
+omitted. `--mamba-root-prefix` is **derived from `--env-prefix`** if
+omitted — a micromamba env prefix is, by construction,
+`<root>/envs/<name>`, so the root is inferred from the prefix you just
+passed. It is deliberately **not** read from the current shell's
+`$MAMBA_ROOT_PREFIX`: every `sbatch` job sources the resulting
+`env.local.conf`, so a wrong value here would contaminate the real
+compute job, not just this recording step. If your shell happens to
+have `$MAMBA_ROOT_PREFIX` set and it disagrees with the derived value,
+the script refuses to guess and exits with an error — pass
+`--mamba-root-prefix` explicitly to pick one (needed only for a
+nonstandard layout where `--env-prefix` isn't under `<root>/envs/`).
+If you set up VSI support in step 7,
 also pass `--bftools-root`/`--libblosc-dir` here — this is now the
 canonical way to record those two paths (they used to be documented as
 plain `export`s only; see [VSI-input
