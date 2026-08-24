@@ -210,7 +210,8 @@ cd heRegistration
 scripts/create-env.sh env create -n heRegistration -f environments/heRegistration.yml
 # or: conda env create -n heRegistration -f environments/heRegistration.yml
 
-# 3. Activate
+# 3. Activate (needs `micromamba shell hook` sourced first — see
+#    docs/install.md § Prerequisites)
 micromamba activate heRegistration
 # or: conda activate heRegistration
 

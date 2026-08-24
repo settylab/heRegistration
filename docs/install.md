@@ -19,6 +19,19 @@ sync.
   ```bash
   "${SHELL}" <(curl -L micro.mamba.pm/install.sh)
   ```
+  **`micromamba activate` (step 3 below) requires the shell hook to
+  already be sourced** — a fresh install of the raw `micromamba` binary
+  does not wire this up by itself. If `micromamba activate
+  heRegistration` fails with `critical libmamba Shell not initialized`
+  / `'micromamba' is running as a subprocess and can't modify the
+  parent shell`, run this once (add it to your shell rc to persist
+  across sessions):
+  ```bash
+  eval "$(micromamba shell hook --shell bash)"   # or --shell zsh
+  ```
+  The install script above offers to do this for you interactively;
+  if you accepted a non-interactive/scripted install, or installed
+  micromamba some other way, it's easy to end up without the hook.
 - A working checkout of hexenium.
 
 ## 1. Clone the repo
@@ -176,10 +189,26 @@ a fresh clone, so this step is mandatory, not optional.
 Generate it with `scripts/write-env-config.sh`:
 
 ```bash
-# From the activated env (step 3), resolve its prefix:
-micromamba env list
-# e.g. heRegistration   /home/you/micromamba/envs/heRegistration
+scripts/write-env-config.sh --env-name heRegistration
+```
 
+`--env-name heRegistration` reads back the prefix that
+`scripts/create-env.sh` (step 2) already recorded to
+`scripts/.env-prefix-heRegistration` at env-creation time — it does
+not query `micromamba env list`. **Do not use `micromamba env list` to
+find this path by hand.** On any account with install history, that
+list shows one row per `heRegistration`-named env ever created, across
+every root ever used — only the CURRENTLY active root's rows are
+name-labeled; every other root's matching row shows a blank Name
+column, so a quick visual scan can easily copy a stale, foreign env's
+path into this command. If you skipped `scripts/create-env.sh` and
+created the env some other way (a bare `micromamba env create` /
+`conda env create`), there is no receipt to read back — resolve the
+prefix yourself (e.g. `conda info --envs`, cross-checking against the
+root you actually just created into) and pass `--env-prefix
+/abs/path/to/the/env` directly instead:
+
+```bash
 scripts/write-env-config.sh --env-prefix /home/you/micromamba/envs/heRegistration
 ```
 
@@ -204,7 +233,7 @@ below):
 
 ```bash
 scripts/write-env-config.sh \
-    --env-prefix    /home/you/micromamba/envs/heRegistration \
+    --env-name      heRegistration \
     --bftools-root  $HOME/opt/bftools \
     --libblosc-dir  $HOME/micromamba/envs/blosc/lib
 ```
@@ -295,12 +324,18 @@ invocation mode.
   `error: scripts/env.local.conf not found` or `MICROMAMBA_BIN ... is
   not an executable file` or similar. You haven't done step 8 yet, or
   `env.local.conf` still points at a prefix that no longer exists (env
-  recreated or moved). Re-run `scripts/write-env-config.sh --env-prefix
-  <path>` and verify with `scripts/env-preflight.sh`.
-  **`--env-name <name>` / `ENV_NAME=<name>` do NOT fix this** — both
-  wrappers still parse them (so old invocations don't hit an "unknown
-  flag" error) but only emit a WARN; activation is always by the
-  absolute prefix pinned in `scripts/env.local.conf`.
+  recreated or moved). Re-run `scripts/write-env-config.sh --env-name
+  heRegistration` (or `--env-prefix <path>`) and verify with
+  `scripts/env-preflight.sh`.
+  **`--env-name <name>` / `ENV_NAME=<name>` passed to
+  `submit_he_registration.sh` / `submit_vsi_to_ometiff.sh` do NOT fix
+  this** — that's a different, deprecated flag on the sbatch launcher
+  scripts (kept only so old invocations don't hit an "unknown flag"
+  error; it only emits a WARN). Activation there is always by the
+  absolute prefix pinned in `scripts/env.local.conf`. This is unrelated
+  to `write-env-config.sh --env-name` above, which does something real:
+  it resolves that absolute prefix from `scripts/create-env.sh`'s
+  receipt file.
 
 If none of these match, `pip install --no-deps -r
 environments/heRegistration-requirements.txt -v` prints per-package

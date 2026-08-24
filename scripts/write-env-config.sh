@@ -16,8 +16,18 @@
 #
 # --env-prefix must already exist (this script records, it does not
 # create, the environment — run `scripts/create-env.sh env create
-# -n heRegistration -f environments/heRegistration.yml` first, then
-# resolve its prefix via `micromamba env list`). --micromamba-bin auto-detects via
+# -n heRegistration -f environments/heRegistration.yml` first). Prefer
+# --env-name heRegistration over --env-prefix: it reads back the path
+# scripts/create-env.sh recorded to scripts/.env-prefix-heRegistration
+# at env-creation time, instead of you resolving it by hand via
+# `micromamba env list` (whose output accumulates one unlabeled row
+# per env ever created on this account, across every root — see
+# docs/install.md step 8 for why that's an easy path to grab a stale,
+# foreign env from). Pass at most one of --env-prefix / --env-name.
+# (Unrelated to the deprecated `--env-name`/`$ENV_NAME` accepted by
+# the sbatch submit scripts — see their own header comments; this is
+# write-env-config.sh's only use of the name.)
+# --micromamba-bin auto-detects via
 # `command -v micromamba` if not passed. --mamba-root-prefix is DERIVED
 # from --env-prefix if not passed: a micromamba env prefix is, by
 # construction, `<root>/envs/<name>`, so the root is
@@ -48,6 +58,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 OUT="$SCRIPT_DIR/env.local.conf"
 
 ENV_PREFIX=""
+ENV_NAME=""
 MICROMAMBA_BIN=""
 MAMBA_ROOT_PREFIX_ARG=""
 BFTOOLS_ROOT=""
@@ -56,23 +67,40 @@ LIBBLOSC_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env-prefix)         ENV_PREFIX="$2"; shift 2 ;;
+        --env-name)           ENV_NAME="$2"; shift 2 ;;
         --micromamba-bin)     MICROMAMBA_BIN="$2"; shift 2 ;;
         --mamba-root-prefix)  MAMBA_ROOT_PREFIX_ARG="$2"; shift 2 ;;
         --bftools-root)       BFTOOLS_ROOT="$2"; shift 2 ;;
         --libblosc-dir)       LIBBLOSC_DIR="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,34p' "$0"; exit 0 ;;
+            sed -n '2,53p' "$0"; exit 0 ;;
         *)
             echo "error: unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 
-: "${ENV_PREFIX:?--env-prefix is required (absolute path to the micromamba env PREFIX)}"
+if [[ -n "$ENV_PREFIX" && -n "$ENV_NAME" ]]; then
+    echo "error: pass at most one of --env-prefix / --env-name, not both." >&2
+    exit 2
+fi
+
+if [[ -n "$ENV_NAME" ]]; then
+    RECEIPT="$SCRIPT_DIR/.env-prefix-$ENV_NAME"
+    if [[ ! -f "$RECEIPT" ]]; then
+        echo "error: --env-name $ENV_NAME: no receipt at $RECEIPT" >&2
+        echo "       Run scripts/create-env.sh env create -n $ENV_NAME -f environments/heRegistration.yml" >&2
+        echo "       first (it writes this file), or pass --env-prefix directly." >&2
+        exit 3
+    fi
+    ENV_PREFIX=$(<"$RECEIPT")
+fi
+
+: "${ENV_PREFIX:?--env-prefix or --env-name is required}"
 
 if [[ ! -d "$ENV_PREFIX" ]]; then
     echo "error: --env-prefix does not exist: $ENV_PREFIX" >&2
     echo "       Create it first: scripts/create-env.sh env create -n heRegistration -f environments/heRegistration.yml" >&2
-    echo "       then resolve its prefix with: micromamba env list" >&2
+    echo "       then pass --env-name heRegistration (recommended) or resolve its prefix yourself." >&2
     exit 3
 fi
 ENV_PREFIX=$(cd "$ENV_PREFIX" && pwd)   # canonicalize to an absolute path
