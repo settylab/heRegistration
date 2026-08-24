@@ -59,9 +59,15 @@ env-creation subcommand you pass it (`env create`, `create`, …). If
 you don't set `MAMBA_ROOT_PREFIX`, it's a plain passthrough. If you
 **do** set `MAMBA_ROOT_PREFIX` to keep this install fully isolated
 (off `$HOME`, for a scratch/test install, or to keep multiple installs
-from sharing state) — e.g.
-`export MAMBA_ROOT_PREFIX=/abs/path/to/isolated/root` first — the
-wrapper also exports `CONDA_PKGS_DIRS="$MAMBA_ROOT_PREFIX/pkgs"` and
+from sharing state) — set these first:
+
+```bash
+export MAMBA_ROOT_PREFIX=/abs/path/to/isolated/root
+export XDG_CACHE_HOME="$MAMBA_ROOT_PREFIX/xdg-cache"
+export XDG_CONFIG_HOME="$MAMBA_ROOT_PREFIX/xdg-config"
+```
+
+The wrapper also exports `CONDA_PKGS_DIRS="$MAMBA_ROOT_PREFIX/pkgs"` and
 asserts afterward that `~/.mamba/pkgs` was not touched. Without this,
 micromamba's `pkgs_dirs` silently resolves to
 `[$MAMBA_ROOT_PREFIX/pkgs, ~/.mamba/pkgs]` — an undocumented second
@@ -74,6 +80,20 @@ need isolation. **Use `scripts/create-env.sh` (not the bare
 prerequisites](#vsi-input-prerequisites-only-if---he-slide-is-a-vsi-file)
 below, which uses the same wrapper.
 
+`scripts/pip-install.sh` (step 4) covers pip's own HTTP/wheel cache,
+but several importable dependencies fall back to the [XDG Base
+Directory](https://specifications.freedesktop.org/basedir-spec/latest/)
+spec (`$XDG_CACHE_HOME`, default `~/.cache`; `$XDG_CONFIG_HOME`,
+default `~/.config`) for their OWN caches, with no repo-specific
+wrapper to intercept them — e.g. `matplotlib` writes a font-list cache
+(`fontlist-*.json`) and a config dir the first time it's imported,
+confirmed to fire during step 7's verify import (`import hest,
+valis_hest, ...`). The two `export`s above redirect this whole class
+of dependency at the source instead of chasing each library that
+writes to `$HOME` one at a time. Leave them unset if you didn't set
+`MAMBA_ROOT_PREFIX` either — everything then falls back to the normal
+`$HOME` locations.
+
 ## 3. Activate
 
 ```bash
@@ -84,8 +104,20 @@ micromamba activate heRegistration
 ## 4. Install the pinned pip layer with `--no-deps`
 
 ```bash
-pip install --no-deps -r environments/heRegistration-requirements.txt
+scripts/pip-install.sh --no-deps -r environments/heRegistration-requirements.txt
 ```
+
+`scripts/pip-install.sh` is a thin wrapper around `pip install`. Like
+`scripts/create-env.sh` (step 2), it's a plain passthrough unless
+`MAMBA_ROOT_PREFIX` is set — but if it IS set, plain `pip install`
+still writes its HTTP + wheel cache to `~/.cache/pip` regardless
+(there's no conda-side `CONDA_PKGS_DIRS` equivalent pip honors by
+default), so this step alone writes 170+ files there with no way to
+opt out. The wrapper overrides `PIP_CACHE_DIR` into
+`$MAMBA_ROOT_PREFIX/pip-cache` and asserts afterward that
+`~/.cache/pip` was not touched, the same isolation guarantee
+`create-env.sh` gives the conda side. A bare `pip install --no-deps
+-r ...` still works exactly as before if you don't need isolation.
 
 This installs `hest` (from the pinned `v1.2.0` git tag),
 `valis-wsi 1.1.0`, `valis_hest 0.0.2`, and the ~160 supporting
@@ -118,13 +150,13 @@ file (pip refuses), so it lives on the CLI here.
 For end users:
 
 ```bash
-pip install --no-deps .
+scripts/pip-install.sh --no-deps .
 ```
 
 For developers (editable):
 
 ```bash
-pip install --no-deps -e .
+scripts/pip-install.sh --no-deps -e .
 ```
 
 `--no-deps` here is **essential**: without it, pip re-resolves
@@ -155,7 +187,7 @@ The requirements file already installs HEST from the `mahmoodlab/HEST`
 
 ```bash
 git clone --branch v1.2.0 https://github.com/mahmoodlab/HEST.git ~/HEST
-pip install --no-deps -e ~/HEST
+scripts/pip-install.sh --no-deps -e ~/HEST
 ```
 
 ## 7. Verify

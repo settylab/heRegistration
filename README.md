@@ -218,13 +218,15 @@ micromamba activate heRegistration
 # 4. Install the pinned pip layer with `--no-deps`.
 #    Ships hest v1.2.0, valis-wsi 1.1.0, valis_hest 0.0.2, and
 #    their supporting stack. `--no-deps` is required — see the
-#    callout below.
-pip install --no-deps -r environments/heRegistration-requirements.txt
+#    callout below. scripts/pip-install.sh wraps `pip install`; if
+#    you set MAMBA_ROOT_PREFIX (step 2) it also keeps pip's HTTP +
+#    wheel cache isolated (see docs/install.md § 4).
+scripts/pip-install.sh --no-deps -r environments/heRegistration-requirements.txt
 
 # 5. Install hexenium itself. `--no-deps` here prevents pip
 #    from re-resolving pyproject.toml's deps and clobbering
 #    the pinned layer from step 4.
-pip install --no-deps .
+scripts/pip-install.sh --no-deps .
 
 # 6. Sanity-check the install.
 python -c "import hest, valis_hest, dask, openslide; print('OK')"
@@ -971,7 +973,7 @@ The test suite covers:
 - An end-to-end pipeline smoke test.
 
 ```bash
-pip install -e '.[test]'
+scripts/pip-install.sh -e '.[test]'
 pytest tests/
 ```
 
