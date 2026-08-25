@@ -33,6 +33,7 @@ from hexenium.layout import (
     resolve_he_job_id,
     resolve_layout,
 )
+from hexenium.manifest import output_symlink_run_id
 
 
 def _snapshotable(cfg: dict) -> dict:
@@ -116,40 +117,265 @@ def _merge_run_dir_config(layout: RunLayout, cfg: dict) -> None:
     log(f"[pipeline] merged he_registration: key into {path}")
 
 
-def _maybe_derive_proseg_purified(stages, cfg: dict, layout: RunLayout) -> None:
-    """Auto-derive ``proseg_purified_h5ad`` from the xenium run dir when
-    the user didn't set it explicitly.
+#: Stage name (from `--stages`) → dirname under `he_registration/`.
+#: Only the four sharded stages participate in promotion; ``he_preprocess``
+#: writes to the un-sharded ``converted/`` dir and has no ``output/`` link.
+_PROMOTE_STAGE_DIR = {
+    "register": "register",
+    "warp": "warp",
+    "celltype": "celltyped",
+    "viz": "viz",
+}
 
-    Only fires when celltype is in ``stages`` AND we're in an integrated
-    mode (either --xenium-h5ad or --run-id gives us a xenium_run_dir).
-    Standalone mode has no run_dir; the user must pass the path there.
-    Explicit ``--proseg-purified-h5ad`` always wins (short-circuited before
-    this runs).
 
-    Mutates ``cfg`` in place. Raises ``SystemExit`` with an actionable
-    message if celltype requires proseg but the derived path is missing.
+def _promote_completed_run(
+    *,
+    layout: RunLayout,
+    cfg: dict,
+    stages_ran: list[str],
+    source_register_run_id: str | None,
+) -> None:
+    """Post-success promotion hook for ``--set-default-on-success``.
+
+    Fires ONLY after all requested stages complete successfully. Called
+    from the tail of :func:`run` — a stage failure raises before this
+    runs, so any exception in the pipeline body leaves ``output/`` un-
+    touched (the flag is opt-in and the promote is the LAST thing).
+
+    Lineage resolution (per Tracy's ask in
+    ``settylab/TracyY123-nexus#15`` comment ``5336523381``):
+
+    * For each stage that ran this invocation → the fresh
+      ``layout.he_job_id`` (the ``<he_job_id>`` this run's outputs
+      landed under).
+    * Un-run stages are NOT promoted — their ``output/<stage>``
+      symlink keeps whatever it pointed at before, if anything.
+      "Promote the completed run" means what actually completed.
+
+    Lineage validation extension (see
+    :func:`_validate_promotion_lineage`):
+
+    * ``set_default_run`` already enforces the register↔warp check
+      (celltyped/viz not in scope there because celltype/viz stages
+      write no per-run manifest and thus record no ``source_warp_run_id``).
+    * The extension here catches the "``--stages celltype viz`` with
+      ``--warp-run-id X`` while ``output/warp`` points at ``Y != X``"
+      case that the register↔warp check misses — a downstream-only
+      re-promote that would leave ``output/`` inconsistent.
+
+    The whole helper is atomic-by-refusal: it validates everything
+    upfront and calls :func:`set_default_run` (which itself validates
+    ALL targets exist before touching any symlink). If any check fails
+    it raises ``SystemExit``; ``output/`` is unchanged.
     """
-    if "celltype" not in stages:
-        return
-    if cfg.get("proseg_purified_h5ad"):
-        return
-    if layout.xenium_run_dir is None:
-        return
-    derived = (layout.xenium_run_dir / "spatial_adata"
-               / f"{layout.sample_id}_proseg_purified.h5ad")
-    if derived.exists():
-        cfg["proseg_purified_h5ad"] = str(derived)
-        log(f"[pipeline] auto-detected proseg_purified h5ad -> {derived}")
-        return
-    raise SystemExit(
-        f"proseg_purified h5ad not found at expected path:\n"
-        f"  {derived}\n"
-        f"the celltype stage requires this file. Either run an upstream "
-        f"proseg-purified export first, or pass --proseg-purified-h5ad "
-        f"<path> to override.\n"
-        f"Identity: sample_id={layout.sample_id!r} "
-        f"xenium_run_dir={layout.xenium_run_dir}."
+    from hexenium.set_default_run import format_changes, set_default_run
+
+    promote_ids = _resolve_promotion_ids(
+        layout=layout, stages_ran=stages_ran,
     )
+    if not promote_ids:
+        log("[promote] --set-default-on-success: no promotable stage in "
+            f"--stages={stages_ran!r} (only he_preprocess ran? skipping).")
+        return
+
+    _validate_promotion_lineage(
+        layout=layout,
+        cfg=cfg,
+        stages_ran=stages_ran,
+        promote_ids=promote_ids,
+        source_register_run_id=source_register_run_id,
+    )
+
+    kwargs = {
+        "register_run_id":  promote_ids.get("register"),
+        "warp_run_id":      promote_ids.get("warp"),
+        "celltyped_run_id": promote_ids.get("celltype"),
+        "viz_run_id":       promote_ids.get("viz"),
+    }
+    log(f"[promote] --set-default-on-success: promoting "
+        f"{ {k: v for k, v in kwargs.items() if v} }")
+    result = set_default_run(output_root_he=layout.output_root_he, **kwargs)
+    log("[promote] output/ updated:\n" + format_changes(result))
+
+    # Regenerate summary.html — the promotion above is atomic and
+    # already committed; if the renderer fails, log LOUDLY but do NOT
+    # roll back the symlinks (they're the source of truth). Tracy's
+    # green-light: settylab/TracyY123-nexus#15 comment 5337905668.
+    try:
+        from hexenium.summary_html import render_summary_html
+        render_summary_html(
+            output_root_he=layout.output_root_he,
+            sample_id=layout.sample_id,
+            run_id=layout.xenium_run_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — post-commit, log-and-continue
+        log(f"[promote] ERROR: summary.html render failed after successful "
+            f"symlink promotion: {exc!r}. The output/ symlinks are the "
+            f"source of truth and remain unchanged; re-run "
+            f"`hexenium set-default-run` to regenerate summary.html.")
+
+
+def _resolve_promotion_ids(
+    *, layout: RunLayout, stages_ran: list[str],
+) -> dict[str, str]:
+    """Which promotable stages ran and under which ``<he_job_id>``.
+
+    Every stage in :data:`_PROMOTE_STAGE_DIR` that appears in
+    ``stages_ran`` maps to the current invocation's fresh
+    ``layout.he_job_id`` — that's the ``<he_job_id>`` its outputs just
+    landed under. Un-run stages are omitted from the dict entirely,
+    which is how ``set_default_run`` learns to leave their
+    ``output/<stage>`` symlink alone.
+    """
+    return {
+        stage: layout.he_job_id
+        for stage in stages_ran
+        if stage in _PROMOTE_STAGE_DIR
+    }
+
+
+def _validate_promotion_lineage(
+    *,
+    layout: RunLayout,
+    cfg: dict,
+    stages_ran: list[str],
+    promote_ids: dict[str, str],
+    source_register_run_id: str | None,
+) -> None:
+    """Cross-stage lineage checks that ``set_default_run`` alone can't do.
+
+    ``set_default_run`` reads warp's per-run ``source_register_run_id``
+    to catch register↔warp mismatches, but celltype/viz stages don't
+    write per-run manifests, so a downstream-only promote where the
+    warp INPUT (the stage that celltype/viz consumed) disagrees with
+    ``output/warp`` would slip through. This function reads the
+    pipeline's OWN resolved view (``cfg['warp_run_id']`` /
+    ``layout.he_job_id``) to close that gap.
+
+    Rules enforced:
+
+    1. If ``celltype`` or ``viz`` is being promoted AND ``warp`` is
+       NOT, ``output/warp`` MUST already exist and point at whichever
+       warp celltype/viz just consumed. Otherwise the promoted
+       downstream would be lineage-orphaned.
+    2. If ``register`` is NOT being promoted but ``warp`` IS
+       (rare: ``--stages warp`` alone), ``output/register`` MUST
+       already exist and match the warp's
+       ``source_register_run_id``. ``set_default_run``'s existing
+       register↔warp check catches this too, but we duplicate the
+       preflight here so we fail BEFORE handing off to set-default-run.
+    """
+    output_dir = layout.output_root_he / "output"
+
+    downstream_ran = {"celltype", "viz"} & set(stages_ran)
+    if downstream_ran and "warp" not in promote_ids:
+        warp_consumed = cfg.get("warp_run_id") or layout.he_job_id
+        current_output_warp = output_symlink_run_id(output_dir / "warp")
+        if current_output_warp is None:
+            raise SystemExit(
+                "--set-default-on-success: cannot promote "
+                f"{sorted(downstream_ran)!r} without also promoting warp — "
+                f"output/warp does not exist yet.\n"
+                f"Either include `warp` in --stages, or run "
+                f"`hexenium set-default-run --warp-run-id {warp_consumed}` "
+                f"first (which will also seed output/register)."
+            )
+        if current_output_warp != warp_consumed:
+            raise SystemExit(
+                "--set-default-on-success: lineage mismatch.\n"
+                f"  This run's {sorted(downstream_ran)!r} consumed "
+                f"warp/{warp_consumed}/\n"
+                f"  but output/warp currently points at "
+                f"warp/{current_output_warp}/.\n"
+                f"Promoting would leave output/ inconsistent. Fix:\n"
+                f"  * re-run with `--warp-run-id {current_output_warp}` "
+                f"(match the current default warp), OR\n"
+                f"  * `hexenium set-default-run --warp-run-id {warp_consumed}` "
+                f"before this run (make warp={warp_consumed!r} the default), OR\n"
+                f"  * include `warp` in --stages so a fresh warp is promoted "
+                f"alongside downstream."
+            )
+
+    if "warp" in promote_ids and "register" not in promote_ids:
+        current_output_register = output_symlink_run_id(output_dir / "register")
+        if source_register_run_id is None:
+            # Should be unreachable — warp always resolves a source. Guard
+            # so a future refactor can't silently drop the field.
+            raise SystemExit(
+                "--set-default-on-success: internal error — warp promoted "
+                "but source_register_run_id is unset. Refusing to promote."
+            )
+        if current_output_register is None:
+            raise SystemExit(
+                "--set-default-on-success: cannot promote warp without "
+                "also promoting register — output/register does not exist "
+                "yet.\n"
+                f"Either include `register` in --stages, or run "
+                f"`hexenium set-default-run --register-run-id "
+                f"{source_register_run_id}` first."
+            )
+        if current_output_register != source_register_run_id:
+            raise SystemExit(
+                "--set-default-on-success: lineage mismatch.\n"
+                f"  This run's warp consumed register/{source_register_run_id}/\n"
+                f"  but output/register currently points at "
+                f"register/{current_output_register}/.\n"
+                f"Include `register` in --stages, or set-default-run the "
+                f"correct register first."
+            )
+
+
+def _resolve_existing_registrar(
+    *,
+    register_root: Path,
+    explicit_register_run_id: str | None,
+) -> tuple[Path | None, str | None]:
+    """Locate the registrar pickle to feed into warp when register is
+    NOT in this invocation's ``--stages``.
+
+    Precedence:
+
+    1. ``explicit_register_run_id`` (from ``--register-run-id``) —
+       read ``<register_root>/<X>/manifest.yaml`` directly. Fail LOUD
+       if that manifest is missing rather than silently falling back to
+       the default symlink; the operator asked for a specific pick and
+       hiding a typo behind the fallback would poison downstream
+       lineage checks.
+    2. ``<register_root>/manifest.yaml`` — the default-symlink pointer
+       the register stage maintains. Reads through the symlink to the
+       per-run manifest. Returned ``source_register_run_id`` is
+       resolved from the manifest's ``he_job_id`` field (falling back
+       to the symlink target's leading path component for older
+       manifests written before this field existed).
+
+    Returns ``(registrar_pickle, source_register_run_id)``. Both are
+    ``None`` when no register output exists yet — the warp stage's
+    subsequent ``registrar_pickle is None`` guard raises the actionable
+    error message.
+    """
+    from hexenium.manifest import read_manifest, symlink_target_run_id
+
+    if explicit_register_run_id:
+        per_run = register_root / explicit_register_run_id / "manifest.yaml"
+        if not per_run.exists():
+            raise SystemExit(
+                f"--register-run-id {explicit_register_run_id!r}: "
+                f"manifest not found at {per_run}. Either fix the run id "
+                f"or drop the flag to fall back to the default (the last "
+                f"successful register writes {register_root}/manifest.yaml)."
+            )
+        m = read_manifest(per_run)
+        log(f"[pipeline] --register-run-id {explicit_register_run_id!r} -> {per_run}")
+        return Path(m["registrar_pickle"]), explicit_register_run_id
+
+    default_link = register_root / "manifest.yaml"
+    if not default_link.exists():
+        return None, None
+    m = read_manifest(default_link)
+    source_id = m.get("he_job_id") or symlink_target_run_id(default_link)
+    log(f"[pipeline] using default registrar (he_job_id={source_id!r}) "
+        f"from {default_link}")
+    return Path(m["registrar_pickle"]), source_id
 
 
 def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
@@ -168,7 +394,15 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
     cfg["sample_id"] = layout.sample_id
     cfg["he_job_id"] = layout.he_job_id
 
-    _maybe_derive_proseg_purified(stages, cfg, layout)
+    # Note: no proseg_purified auto-derive. The prior
+    # ``_maybe_derive_proseg_purified`` helper was removed on the
+    # ``4-changes-impl-fixes-needed-resolution`` pass (settylab/
+    # TracyY123-nexus#15 skeptic F1). Its silent mutation of
+    # ``cfg["proseg_purified_h5ad"]`` was pinning integrated-mode
+    # invocations into the legacy proseg-NN celltype path — making the
+    # new ranger-direct default unreachable through Tracy's typical
+    # cmdline. Legacy proseg-NN is still available: pass
+    # ``--proseg-purified-h5ad <path>`` explicitly.
 
     layout.ensure_dirs()
 
@@ -197,6 +431,12 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
 
     n_stages = len(stages)
     registrar_pickle = None
+    # Tracks which register/<he_job_id>/ the current invocation is
+    # consuming. Populated by same-invocation register OR by the
+    # manifest-resolution branch below (--register-run-id explicit /
+    # default-symlink implicit). Passed into warp's per-run manifest as
+    # `source_register_run_id` so set-default-run can validate lineage.
+    source_register_run_id: str | None = None
     # Default warp/celltype dirs for the current run — may be overridden
     # by --warp-run-id / --celltype-run-id below to point at prior runs.
     warp_dir = layout.warp_dir(cfg.get("warp_run_id"))
@@ -272,15 +512,16 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             symlink_to_canonical_name=he_cfg["symlink_to_canonical_name"],
             force_rerun=force_rerun,
         )
+        # Same-invocation register+warp: source register IS this run's
+        # <he_job_id>. Recorded in the warp manifest for lineage.
+        source_register_run_id = layout.he_job_id
         banner(f"stage {idx}/{n_stages}: register — complete in {time.time()-t0:.1f}s")
     else:
-        # Try to discover an existing registrar from the manifest.
-        manifest = layout.registration_dir.parent / "manifest.yaml"
-        if manifest.exists():
-            with open(manifest) as f:
-                m = yaml.safe_load(f)
-            registrar_pickle = Path(m["registrar_pickle"])
-            log(f"[pipeline] using existing registrar from manifest: {registrar_pickle}")
+        # Warp-without-register: resolve which register/<X>/ to consume.
+        registrar_pickle, source_register_run_id = _resolve_existing_registrar(
+            register_root=layout.registration_dir.parent,
+            explicit_register_run_id=cfg.get("register_run_id"),
+        )
 
     if "warp" in stages:
         idx = stages.index("warp") + 1
@@ -310,6 +551,7 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             out_dir=layout.warp_dir(),
             dapi_path=dapi_path,
             targets=targets,
+            source_register_run_id=source_register_run_id,
             use_dask=warp_cfg["use_dask"],
             save_geojson=warp_cfg["save_geojson"],
             dask_n_workers=warp_cfg["dask"]["n_workers"],
@@ -371,12 +613,35 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             dpi=v["dpi"],
             cell_alpha=v["cell_alpha"],
             nucleus_alpha=v["nucleus_alpha"],
+            he_alpha=v["he_alpha"],
+            cell_edge_linewidth=v["cell_edge_linewidth"],
             classification_palette=v.get("classification_palette"),
             palette_cmap=v.get("palette_cmap", "tab20"),
-            render_boundaries=v.get("render_boundaries", "nucleus"),
+            render_boundaries=v.get("render_boundaries", "cell"),
             force_rerun=force_rerun,
+            # Threaded so viz can inherit the celltype palette from the
+            # xenium-preprocess UMAP for the same sample/run — matches
+            # <xenium_run_dir>/summary/<sample>_color_map.json when
+            # present, graceful cmap fallback otherwise.
+            xenium_run_dir=layout.xenium_run_dir,
         )
         banner(f"stage {idx}/{n_stages}: viz — complete in {time.time()-t0:.1f}s")
+
+    # Post-success promotion (opt-in). Fires ONLY after all stages
+    # above completed without raising — a stage-level SystemExit /
+    # RuntimeError propagates out of this function before this point,
+    # so the promote never sees a partial-success run and `output/`
+    # stays put on failure. Any SystemExit inside the promote itself
+    # (lineage mismatch, missing target) also propagates out unchanged
+    # — set_default_run validates ALL targets up-front so we're
+    # atomic-by-refusal.
+    if cfg.get("set_default_on_success"):
+        _promote_completed_run(
+            layout=layout,
+            cfg=cfg,
+            stages_ran=list(stages),
+            source_register_run_id=source_register_run_id,
+        )
 
     banner(f"hexenium done in {time.time()-pipeline_t0:.1f}s "
            f"-> {layout.output_root_he}/")

@@ -6,8 +6,12 @@ pyproject.toml.
 Three invocation modes:
 
 * **standalone** — ``--sample-id`` + ``--he-path`` + ``--xenium-bundle`` +
-  ``--output-root`` (+ ``--proseg-purified-h5ad`` for the celltype
-  stage). Outputs land at ``<output_root>/<sample_id>/{...}``.
+  ``--output-root``. Outputs land at ``<output_root>/<sample_id>/{...}``.
+  Neither ``--xenium-h5ad`` nor ``--proseg-purified-h5ad`` is enforced
+  for the celltype stage — omitting both labels every cell
+  ``UNLABELED`` and the run proceeds; pass ``--xenium-h5ad`` for the
+  ranger-direct default, or add ``--proseg-purified-h5ad`` for the
+  legacy NN-mapping path.
 
 * **integrated-by-run-id** — add ``--run-id`` on top of the standalone
   set. Derives the xenium h5ad path from the upstream layout
@@ -82,11 +86,16 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                         "so the path is derived.")
     p.add_argument("--proseg-purified-h5ad", type=Path, default=None,
                    help="Upstream proseg_purified h5ad. Its .obs carries celltypes "
-                        "+ centroids that get NN-mapped onto every xenium cell. "
+                        "+ centroids that get NN-mapped onto every xenium cell -- "
+                        "but only when --xenium-h5ad is ALSO set; this flag alone "
+                        "(no --xenium-h5ad) falls through to UNLABELED, same as "
+                        "neither being set. "
                         "Auto-derived from <xenium_run_dir>/spatial_adata/"
                         "<sample>_proseg_purified.h5ad when unset AND either "
                         "--xenium-h5ad or --run-id is passed (integrated modes). "
-                        "Required in standalone mode when celltype is in --stages.")
+                        "Not required in standalone mode: if celltype is in "
+                        "--stages and neither this nor --xenium-h5ad is set, "
+                        "every cell is labeled UNLABELED (logged, not an error).")
     p.add_argument("--dapi-path", type=Path, default=None,
                    help="Full path to the DAPI/morphology image to register against. "
                         "If omitted, derives from <xenium_bundle>/morphology_focus/"
@@ -98,12 +107,29 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                    help="Explicit run label for this invocation (overrides "
                         "$SLURM_JOB_ID). Interactive fallback: YYYYMMDDTHHMMSS "
                         "timestamp.")
+    p.add_argument("--register-run-id", default=None,
+                   help="When running warp against a specific prior registration, "
+                        "point at register/<id>/manifest.yaml directly instead of "
+                        "the register/manifest.yaml default-symlink. Use to compare "
+                        "downstream results across multiple registrations of the "
+                        "same sample.")
     p.add_argument("--warp-run-id", default=None,
                    help="When running celltype/viz without a preceding warp in "
                         "this invocation, point at a prior warp/<id>/ folder.")
     p.add_argument("--celltype-run-id", default=None,
                    help="When running viz without a preceding celltype in this "
                         "invocation, point viz at a prior celltyped/<id>/ folder.")
+    p.add_argument("--set-default-on-success", action="store_true",
+                   help="After all requested stages complete successfully, "
+                        "atomically promote the run's outputs to "
+                        "<sample>/he_registration/output/ (reusing "
+                        "`hexenium set-default-run`). OFF by default so "
+                        "debug/experiment runs never move `output/`. Only "
+                        "stages that RAN in this invocation are promoted; "
+                        "un-run stages keep their existing pointer. Lineage "
+                        "is validated (register↔warp AND celltype/viz→warp) "
+                        "before any symlink moves — a mismatch aborts the "
+                        "promote with `output/` unchanged.")
     p.add_argument("--force-rerun", action="store_true",
                    help="Re-run all stages even if sentinel outputs exist.")
     p.add_argument("--force-preprocess", action="store_true",
@@ -152,9 +178,12 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                    help="Use Dask LocalCluster + JVMPlugin for warp.")
     # Celltype — inlined proseg → xenium NN mapping.
     p.add_argument("--celltype-col", default=None,
-                   help="Column on proseg_purified.h5ad's .obs to use as celltype "
-                        "label. Default 'auto' — precedence celltype > first_type > "
-                        "primary_cell_type > celltype_updated.")
+                   help="Column on the source h5ad's .obs to use as celltype "
+                        "label. Default 'celltype' (matches xenium-preprocess's "
+                        "rctd-split celltype_writeback). Set to 'auto' for "
+                        "precedence celltype > first_type > primary_cell_type "
+                        "> celltype_updated. Missing / all-NaN → 'unlabeled' "
+                        "fallback (rendered as grey #888888 by viz).")
     p.add_argument("--id-col", default=None,
                    help="Column on xenium.h5ad's .obs holding xenium UUIDs. "
                         "Default 'auto' — shape-check first, prefers UUID-shaped "
@@ -168,6 +197,34 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--viz-render-boundaries",
                    choices=("cell", "nucleus", "both"), default=None,
                    help="Which boundaries to draw on the overlay.")
+
+
+def _add_set_default_run_args(p: argparse.ArgumentParser) -> None:
+    """Argparse wiring for ``hexenium set-default-run``.
+
+    Identity resolution mirrors ``run``: pass ``--sample-id`` +
+    ``--output-root`` (standalone), optionally with ``--run-id`` for
+    integrated-by-run-id mode. Only one ``--*-run-id`` flag is
+    required; the rest keep their current pointer (partial update).
+    """
+    p.add_argument("--sample-id", required=True,
+                   help="Sample identifier — same value used at pipeline run time.")
+    p.add_argument("--run-id", default=None,
+                   help="Upstream xenium-preprocess run id (integrated-by-run-id "
+                        "mode). Omit for standalone-mode layouts.")
+    p.add_argument("--output-root", required=True, type=Path,
+                   help="Root output directory (same value passed at run time).")
+    p.add_argument("--register-run-id", default=None,
+                   help="Retarget output/register to register/<he_job_id>/.")
+    p.add_argument("--warp-run-id", default=None,
+                   help="Retarget output/warp to warp/<he_job_id>/.")
+    p.add_argument("--celltyped-run-id", default=None,
+                   help="Retarget output/celltyped to celltyped/<he_job_id>/.")
+    p.add_argument("--viz-run-id", default=None,
+                   help="Retarget output/viz to viz/<he_job_id>/.")
+    p.add_argument("--force-lineage", action="store_true",
+                   help="Bypass the register↔warp lineage-consistency refusal. "
+                        "Use only when deliberately cross-comparing.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -184,6 +241,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     _add_run_args(run_p)
+
+    sdr_p = sub.add_parser(
+        "set-default-run",
+        help="Re-point output/<stage> symlinks after visual QA.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_set_default_run_args(sdr_p)
     return parser
 
 
@@ -215,10 +279,14 @@ def _resolve_config(args: argparse.Namespace) -> dict:
         overrides["output_root"] = str(args.output_root)
     if args.he_job_id is not None:
         overrides["he_job_id"] = args.he_job_id
+    if args.register_run_id is not None:
+        overrides["register_run_id"] = args.register_run_id
     if args.warp_run_id is not None:
         overrides["warp_run_id"] = args.warp_run_id
     if args.celltype_run_id is not None:
         overrides["celltype_run_id"] = args.celltype_run_id
+    if args.set_default_on_success:
+        overrides["set_default_on_success"] = True
     if args.force_rerun:
         overrides["force_rerun"] = True
     if args.force_preprocess:
@@ -325,6 +393,20 @@ def _resolve_config(args: argparse.Namespace) -> dict:
     return cfg
 
 
+def _resolve_set_default_run_output_root_he(args: argparse.Namespace) -> Path:
+    """Compute the ``he_registration/`` root from the identity flags.
+
+    Mirrors the layout module's two integrated/standalone shapes
+    (skipping the h5ad-driven mode — ``set-default-run`` is a
+    lightweight symlink-toggle command, not worth another loader).
+    """
+    output_root = Path(args.output_root).resolve()
+    sample_id = args.sample_id
+    if args.run_id:
+        return output_root / sample_id / f"{sample_id}_{args.run_id}" / "he_registration"
+    return output_root / sample_id
+
+
 def main(argv: list[str] | None = None) -> int:
     import sys
 
@@ -333,6 +415,44 @@ def main(argv: list[str] | None = None) -> int:
         from hexenium.pipeline import run
         cfg = _resolve_config(args)
         return run(cfg, stages=list(args.stages), argv=sys.argv)
+    if args.cmd == "set-default-run":
+        from hexenium.set_default_run import format_changes, set_default_run
+        output_root_he = _resolve_set_default_run_output_root_he(args)
+        if not output_root_he.exists():
+            raise SystemExit(
+                f"set-default-run: he_registration/ tree not found at "
+                f"{output_root_he}. Check --sample-id/--run-id/--output-root."
+            )
+        result = set_default_run(
+            output_root_he=output_root_he,
+            register_run_id=args.register_run_id,
+            warp_run_id=args.warp_run_id,
+            celltyped_run_id=args.celltyped_run_id,
+            viz_run_id=args.viz_run_id,
+            force_lineage=args.force_lineage,
+        )
+        print(format_changes(result))
+        # Regenerate summary.html — the symlink promotion above is
+        # atomic and already committed; a render failure here logs
+        # LOUDLY (via summary_html itself) but must NOT roll back
+        # the symlinks. Tracy's green-light:
+        # settylab/TracyY123-nexus#15 comment 5337905668.
+        try:
+            from hexenium.summary_html import render_summary_html
+            render_summary_html(
+                output_root_he=output_root_he,
+                sample_id=args.sample_id,
+                run_id=args.run_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — post-commit log-and-continue
+            import sys as _sys
+            print(
+                f"WARN: set-default-run committed symlink changes but "
+                f"summary.html render failed: {exc!r}. Re-run to "
+                f"regenerate.",
+                file=_sys.stderr,
+            )
+        return 0
     raise SystemExit(f"unknown command: {args.cmd}")
 
 

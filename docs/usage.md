@@ -90,8 +90,9 @@ Anything after the four positionals is forwarded verbatim to
 
 ## Config
 
-`hexenium` looks for its default config at `config/default.yaml`
-inside the package tree. Override any subset with a user YAML:
+`hexenium` looks for its default config at
+`src/hexenium/_defaults/default.yaml` inside the package tree.
+Override any subset with a user YAML:
 
 ```bash
 hexenium run --config my_overrides.yaml --sample-id SAMPLE1 …
@@ -171,7 +172,8 @@ supported.
 
 Other knobs (algorithm, tiebreak, coord scaling, output naming,
 extra_columns) live in the `nn_celltype_mapping:` block of
-`config/default.yaml` — override via `--config user.yaml`.
+`src/hexenium/_defaults/default.yaml` — override via
+`--config user.yaml`.
 
 **Piping into the celltype stage.** Once the CSV lands, re-run with
 `--celltype-csv <path> --stages celltype viz` to consume it:

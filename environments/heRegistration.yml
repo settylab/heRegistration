@@ -1,36 +1,110 @@
-name: heRegistration
+# Lockfile-style spec for the `heRegistration` env. Reproduces the
+# exact package versions in Tracy's currently-working micromamba env
+# (see settylab/TracyY123-nexus#15 comment 5325462135 and the sync
+# recovered via `micromamba env export -n heRegistration --from-history`
+# + `pip freeze`).
+#
+# Two-step install (see the README's "Recommended" section):
+#   1. `scripts/create-env.sh env create -f environments/heRegistration.yml`
+#      — solves the conda block below (system libs + scientific-Python
+#      core). Wraps `micromamba env create` so an isolated
+#      MAMBA_ROOT_PREFIX doesn't leak package-cache state to
+#      ~/.mamba/pkgs — see scripts/create-env.sh for why.
+#   2. `pip install --no-deps -r environments/heRegistration-requirements.txt`
+#      — pins the pip-only overrides (torch/transformers/ultralytics/…
+#      and hest/valis-wsi) at their exact working versions.
+#
+# Why the pip block was factored OUT of this yaml (was previously inline
+# with a `- --no-deps` sentinel):
+#   valis-wsi 1.1's declared Requires-Dist caps `pandas<2.0`,
+#   `pyvips<3.0` and `scikit-image<0.20`. Its actual code paths run
+#   fine with pandas 2.x / pyvips 3.x / scikit-image 0.19.x — which is
+#   exactly the state the working env has. Reproducing that state
+#   requires `pip install --no-deps`, but `--no-deps` can neither live
+#   in a yaml pip: block (micromamba treats each entry as a package
+#   name — "ERROR: Invalid requirement: --no-deps") nor at the top of
+#   a requirements.txt (pip itself refuses: "no such option:
+#   --no-deps"). So the flag lives on the CLI in step 2 above.
+#
+# Name intentionally omitted so the caller picks the env name at
+# create time:
+#   scripts/create-env.sh env create -n <your-env-name> -f environments/heRegistration.yml
 channels:
   - conda-forge
   - bioconda
 dependencies:
+  # === Core scientific-Python stack ===
+  # Loose caps match Tracy's working env (`env export --from-history`
+  # produced `numpy<2` / `pandas<3` — pins that permit numpy 1.26.4
+  # and pandas 2.3.x, both of which the working env has).
+  #
+  # numpy is HARD-PINNED to 1.26.4 (not just `<2`) because
+  # `fastcluster` — pulled in by the pip layer — ships a compiled
+  # `.so` linked against numpy 1.x's C API. A drift to numpy 2.x
+  # loads that `.so` and raises `_ARRAY_API not found` /
+  # `numpy.core.multiarray failed to import` at first import (the
+  # classic numpy 1↔2 ABI mismatch). See
+  # settylab/TracyY123-nexus#15 comment 5336001245 for the full
+  # diagnostic trail. The `numpy==1.26.4` pin also appears in
+  # `heRegistration-requirements.txt` as a belt-and-braces guard
+  # against a `pip install --force-reinstall <pkg>` re-resolving
+  # transitive deps and pulling numpy 2.x.
+  #
+  # Companion pin: `fastcluster==1.2.6` in
+  # `heRegistration-requirements.txt` (NOT 1.3.0). fastcluster
+  # 1.3.0 calls `numpy.array(..., copy=None)` inside `linkage()`
+  # for `method='single'` (the branch valis_hest's rigid
+  # registration hits), which numpy 1.26.4 rejects with
+  # `ValueError: NoneType copy mode not allowed`. Full diagnostic:
+  # settylab/TracyY123-nexus#15 comment 5361751664.
   - python=3.11
   - numpy=1.26.4
+  - pandas<3
   - scipy
-  - pandas
-  - pyarrow=23
+  - pyarrow
   - pyyaml
-  - matplotlib=3.10
-  - scikit-image=0.19
-  - scikit-learn=1.8
-  - shapely=2.1
-  - geopandas=1.1
-  - dask=2026.1
-  - dask-geopandas=0.5
-  - distributed
-  - openslide-python=1.4
-  - tifffile=2026.1
-  - pyvips=2.2
+  # scanpy>=1.10 excludes the ancient 1.4-1.7 branch that requires
+  # umap-learn<0.5, which conda-forge no longer ships — under a
+  # stale mirror snapshot the solver would drift into it and emit
+  # a "umap-learn does not exist" cascade instead of failing on
+  # scanpy itself. See settylab/TracyY123-nexus#15 comment 5332790877.
+  - scanpy>=1.10
+  - dask-geopandas
+  - shapely
+  - proj
+  - pyproj
+  - ipykernel
+  - importlib_metadata
+  - "pycparser>=2.14"
+
+  # === Imaging system libs (VIPS + ImageMagick + OpenSlide) ===
+  # pyvips 3.x on conda: the working env has pyvips 3.1.1 from
+  # conda-forge, contradicting valis-wsi 1.1's `pyvips<3` declared
+  # pin. valis-wsi's code paths do not touch the removed pyvips 2
+  # API, so 3.x works. imagemagick silences the vips-magick.so
+  # dlopen warning by providing libMagickCore-7.Q16HDRI.so.10.
+  #
+  # libvips>=8.15 / pyvips>=3 lock the solver OUT of the older
+  # pyvips 2.2 -> libvips 8.13 branch. Without these floors, a
+  # stale-cache or lagged-mirror micromamba run drifts into that
+  # branch and dies on a gdk-pixbuf / librsvg cascade. See
+  # settylab/TracyY123-nexus#15 comment 5332790877.
+  - libvips>=8.15
+  - pyvips>=3
+  - imagemagick
+  - openslide
+
+  # === Java for BioFormats (jpype1 comes via pip below) ===
+  # openjdk pre-provides a JVM so cjdk doesn't have to download one
+  # on first use.
   - openjdk=11
-  - jpype1=1.6
-  - anndata=0.11
-  - scanpy=1.11
-  - opencv
-  # The three image-registration libraries live on PyPI / GitHub. Install
-  # them AFTER the conda env solves.
+
   - pip
-  - pip:
-      - valis-wsi==1.1
-      - valis-hest==0.0.2
-      # HEST is an editable clone in the reference README (patched
-      # locally); install from GitHub for a fresh env.
-      - "hest @ git+https://github.com/mahmoodlab/HEST.git"
+
+  # NOTE: the pip: block that used to live here was factored OUT into
+  # `environments/heRegistration-requirements.txt`. Install it as a
+  # separate step AFTER `micromamba env create`:
+  #   pip install --no-deps -r environments/heRegistration-requirements.txt
+  # See the file-level docstring at the top of THIS file (and the
+  # README's "Recommended" section) for why `--no-deps` cannot live
+  # inline in either the yaml pip: block or the requirements.txt.

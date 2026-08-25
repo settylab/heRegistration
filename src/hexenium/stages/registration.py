@@ -21,6 +21,13 @@ from pathlib import Path
 
 from hexenium._internal.compat import apply_numpy_shims  # kill_jvm_safely intentionally not imported — see note in run_registration
 from hexenium._internal.logging import log
+from hexenium.manifest import (
+    compute_params_hash,
+    git_sha,
+    set_default_symlink,
+    utc_timestamp,
+    write_manifest,
+)
 
 
 def _canonical_he_symlink(he_path: Path, workdir: Path) -> Path:
@@ -150,16 +157,42 @@ def run_registration(
     # not path-carrying.
     run_name = name or f"{sample_id}_{get_name_datetime()}"
     registrar_dir = out_dir  # caller pre-encodes <he_job_id>
+    he_job_id = registrar_dir.name
     sentinel = registrar_dir / "data" / "_registrar.pickle"
+
+    # Params consumed by the registrar — used for both the manifest
+    # snapshot AND the params_hash. Kept as a single dict so the hash
+    # is stable across re-runs with identical params.
+    reg_params = {
+        "mode": mode,
+        "use_he_deconvolution": use_he_deconvolution,
+        "check_for_reflections": check_for_reflections,
+        "create_masks": create_masks,
+        "align_to_reference": align_to_reference,
+        "max_image_dim_px": max_image_dim_px,
+        "max_processed_image_dim_px": max_processed_image_dim_px,
+        "max_non_rigid_registration_dim_px": max_non_rigid_registration_dim_px,
+    }
+    params_hash = compute_params_hash(reg_params)
+
     if sentinel.exists() and not force_rerun:
         log(f"[registration] skip — registrar already exists at {sentinel}")
         # Persist a manifest pointer if missing.
-        _write_manifest(container / "manifest.yaml", {
-            "sample_id": sample_id,
-            "registrar_pickle": str(sentinel),
-            "run_dir": str(registrar_dir),
-            "skipped_resume": True,
-        })
+        _write_run_manifests(
+            registrar_dir=registrar_dir,
+            container=container,
+            payload={
+                "sample_id": sample_id,
+                "he_job_id": he_job_id,
+                "run_dir": str(registrar_dir),
+                "registrar_pickle": str(sentinel),
+                "skipped_resume": True,
+                "params": reg_params,
+                "params_hash": params_hash,
+                "git_sha": git_sha(),
+                "timestamp_utc": utc_timestamp(),
+            },
+        )
         return sentinel
 
     registrar_dir.mkdir(parents=True, exist_ok=True)
@@ -246,30 +279,42 @@ def run_registration(
             "Inspect the registrar_dir for partial output."
         )
 
-    _write_manifest(container / "manifest.yaml", {
-        "sample_id": sample_id,
-        "run_name": run_name,
-        "run_dir": str(registrar_dir),
-        "he_input_real": str(he_path),
-        "he_passed_to_valis": str(he_for_valis),
-        "dapi_path": str(dapi_path),
-        "registrar_pickle": str(sentinel),
-        "mode": mode,
-        "use_he_deconvolution": use_he_deconvolution,
-        "check_for_reflections": check_for_reflections,
-        "create_masks": create_masks,
-        "align_to_reference": align_to_reference,
-        "max_image_dim_px": max_image_dim_px,
-        "max_processed_image_dim_px": max_processed_image_dim_px,
-        "max_non_rigid_registration_dim_px": max_non_rigid_registration_dim_px,
-        "dropped_valis_kwargs_init": dropped_init,
-    })
+    _write_run_manifests(
+        registrar_dir=registrar_dir,
+        container=container,
+        payload={
+            "sample_id": sample_id,
+            "he_job_id": he_job_id,
+            "run_name": run_name,
+            "run_dir": str(registrar_dir),
+            "he_input_real": str(he_path),
+            "he_passed_to_valis": str(he_for_valis),
+            "dapi_path": str(dapi_path),
+            "registrar_pickle": str(sentinel),
+            "params": reg_params,
+            "params_hash": params_hash,
+            "git_sha": git_sha(),
+            "timestamp_utc": utc_timestamp(),
+            "dropped_valis_kwargs_init": dropped_init,
+        },
+    )
     log(f"[registration] done -> {sentinel}")
     return sentinel
 
 
-def _write_manifest(path: Path, payload: dict) -> None:
-    import yaml  # PyYAML
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        yaml.safe_dump(payload, f, sort_keys=False)
+def _write_run_manifests(*, registrar_dir: Path, container: Path, payload: dict) -> None:
+    """Write the per-run manifest and re-point the stage-root symlink.
+
+    Layout:
+      ``<container>/<he_job_id>/manifest.yaml`` — this run's immutable
+      manifest; never overwritten by later register runs.
+
+      ``<container>/manifest.yaml`` — relative symlink pointing at the
+      per-run manifest; each successful register run rewrites this to
+      itself. Warp reads through the symlink when ``--register-run-id``
+      is not passed, so this pointer IS the current default.
+    """
+    per_run = registrar_dir / "manifest.yaml"
+    write_manifest(per_run, payload)
+    set_default_symlink(container / "manifest.yaml",
+                        f"{registrar_dir.name}/manifest.yaml")

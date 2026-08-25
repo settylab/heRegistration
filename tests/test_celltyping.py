@@ -14,16 +14,20 @@ import pandas as pd
 import pytest
 
 import anndata as ad
+from shapely.geometry import Polygon
 
 from hexenium.stages.celltyping import (
+    UNLABELED,
     _CELLTYPE_COL_CANDIDATES,
     _SPATIAL_COORD_OBS_PAIRS,
     _XENIUM_ID_COL_CANDIDATES,
     _celltype_from_nn,
+    _celltype_from_xenium_ranger_direct,
     _get_xenium_ids,
     _resolve_celltype_col,
     _resolve_spatial_coords,
     _resolve_xenium_id_col,
+    run_celltyping,
 )
 
 
@@ -57,15 +61,22 @@ class TestResolveCelltypeCol:
         cols = ["custom_label", "first_type"]
         assert _resolve_celltype_col(cols, "custom_label") == "custom_label"
 
-    def test_explicit_col_missing_fails_loud(self):
+    def test_explicit_col_missing_returns_none_for_fallback(self):
+        # Historic behavior (pre-Tracy 5352008910) was to raise
+        # KeyError. New contract: return ``None`` so the caller can
+        # fall back to ``UNLABELED`` for every row. The resolver
+        # itself just WARN-logs.
         cols = ["first_type"]
-        with pytest.raises(KeyError, match="missing celltype column 'nope'"):
-            _resolve_celltype_col(cols, "nope")
+        assert _resolve_celltype_col(cols, "nope") is None
 
-    def test_no_candidates_fails_loud(self):
+    def test_no_candidates_returns_none_for_fallback(self):
+        # Same: auto-detect failure now returns None + logs WARN
+        # instead of raising KeyError. Cross-ref cross-user finding on
+        # ``settylab/msetty-nexus#35`` comment ``5356740940`` — the
+        # stale KeyError assertion was one of the two stale
+        # TestResolveCelltypeCol tests.
         cols = ["x", "y"]
-        with pytest.raises(KeyError, match="could not auto-detect"):
-            _resolve_celltype_col(cols, "auto")
+        assert _resolve_celltype_col(cols, "auto") is None
 
     def test_candidate_order_is_authoritative(self):
         # Even if `celltype_updated` comes first alphabetically, the
@@ -492,3 +503,373 @@ class TestCelltypeFromNn:
         assert len(annot) == 3
         assert annot.loc[annot["xenium_cell_id"] == "aaaaafep-1", "group"].iloc[0] == "Tumor"
         assert annot.loc[annot["xenium_cell_id"] == "lkkgeihi-1", "group"].iloc[0] == "Fibroblast"
+
+
+def _make_warped_parquet(path: Path, xenium_ids, polygons):
+    """Emit a warp-stage-shaped parquet — mirror of the helper in
+    ``test_pipeline_e2e.py``. Kept local so this module has no
+    cross-file test-fixture import.
+    """
+    from shapely import to_wkb
+    df = pd.DataFrame({
+        "geometry": [to_wkb(p) for p in polygons],
+    })
+    df.index = xenium_ids
+    df.index.name = "__null_dask_index__"
+    df.to_parquet(path)
+
+
+# ---------------------------------------------------------------------
+# Ranger-direct celltype source (Tracy `5352008910` Ask 1).
+#
+# These tests cover the NEW default path introduced on commit
+# ``26e78b0`` and the routing fix from skeptic F1 (commit that lands
+# on top): with just ``--xenium-h5ad``, hexenium reads
+# ``.obs[<celltype_col>]`` directly instead of NN-mapping from
+# proseg_purified. Adds direct test coverage that skeptic F2 flagged
+# as absent from ``test_celltyping.py``.
+# ---------------------------------------------------------------------
+class TestRangerDirect:
+    def _ranger_h5ad(
+        self,
+        tmp_path: Path,
+        celltype_values,
+        celltype_col: str = "celltype",
+        uuids=("aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"),
+    ) -> Path:
+        """Build a xenium_ranger-shaped h5ad with a celltype column."""
+        n = len(uuids)
+        obs = pd.DataFrame(
+            {celltype_col: list(celltype_values)},
+            index=list(uuids),
+        )
+        adata = ad.AnnData(
+            X=np.zeros((n, 2), dtype=np.float32), obs=obs,
+        )
+        adata.obsm["spatial"] = np.array(
+            [[10.0 * i, 10.0 * i] for i in range(n)], dtype=float,
+        )
+        path = tmp_path / "xenium_ranger.h5ad"
+        adata.write_h5ad(path)
+        return path
+
+    def test_ranger_direct_reads_obs_celltype_column(self, tmp_path: Path):
+        # Default source path: three cells labelled by their own
+        # .obs["celltype"] value. No NN — labels come straight off
+        # the query h5ad.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert set(annot["group"]) == {"Tumor", "Fibroblast", "Bcell"}
+        # nn_distance column is present + all-NaN — no NN happened.
+        assert "nn_distance" in annot.columns
+        assert annot["nn_distance"].isna().all()
+        # ids preserved (whitespace-stripped by the helper).
+        assert set(annot["xenium_cell_id"]) == {
+            "aaaaafep-1", "lkkgeihi-1", "knjdobdk-1",
+        }
+
+    def test_ranger_direct_all_nan_column_falls_to_unlabeled(
+        self, tmp_path: Path,
+    ):
+        # Ask 2c: an existing but entirely-NaN celltype column also
+        # falls back to UNLABELED for every row (no crash).
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=[np.nan, np.nan, np.nan],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert (annot["group"] == UNLABELED).all()
+
+    def test_ranger_direct_mixed_nan_falls_to_unlabeled_per_row(
+        self, tmp_path: Path,
+    ):
+        # Companion to Ask 2c: per-row NaN falls to UNLABELED while
+        # non-null rows keep their labels.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", np.nan, "Bcell"],
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",
+            id_col="auto",
+        )
+        groups = dict(zip(annot["xenium_cell_id"], annot["group"]))
+        assert groups["aaaaafep-1"] == "Tumor"
+        assert groups["lkkgeihi-1"] == UNLABELED
+        assert groups["knjdobdk-1"] == "Bcell"
+
+    def test_ranger_direct_missing_column_falls_to_unlabeled(
+        self, tmp_path: Path,
+    ):
+        # Ask 2 headline case: the requested column doesn't exist on
+        # the h5ad → WARN + all rows UNLABELED. Was KeyError.
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+            celltype_col="not_the_celltype_col",  # column named differently
+        )
+        annot = _celltype_from_xenium_ranger_direct(
+            xenium_h5ad=h5ad_path,
+            celltype_col="celltype",       # asking for a column that doesn't exist
+            id_col="auto",
+        )
+        assert len(annot) == 3
+        assert (annot["group"] == UNLABELED).all()
+
+    def test_run_celltyping_routes_to_ranger_direct_when_only_xenium_h5ad(
+        self, tmp_path: Path,
+    ):
+        # The routing test that would have caught skeptic F1.
+        # Given `xenium_h5ad` but NOT `proseg_purified_h5ad`, run_celltyping
+        # must go through _celltype_from_xenium_ranger_direct (no NN).
+        # We monkeypatch both entry points to spy on which fires.
+        from hexenium.stages import celltyping as _ct
+
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        # Minimal warp parquet so run_celltyping doesn't refuse on
+        # missing warp inputs. Reuse the shape from the test helper
+        # at the top of this module (WKB geometry + __null_dask_index__).
+        warp_dir = tmp_path / "warp"; warp_dir.mkdir()
+        _make_warped_parquet(
+            warp_dir / "he_cell_seg.parquet",
+            xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            # Polygons must be area > `area_threshold_px` (default 20 px²)
+            # or `_clean_boundary_gdf` drops them. 10x10 squares (area
+            # 100) match real warp output scale + skeptic F-A's verified
+            # E2E fixture.
+            polygons=[
+                Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),
+                Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]),
+                Polygon([(40, 40), (50, 40), (50, 50), (40, 50)]),
+            ],
+        )
+        out_dir = tmp_path / "celltyped"; out_dir.mkdir()
+
+        calls = {"nn": 0, "ranger": 0}
+        real_ranger = _ct._celltype_from_xenium_ranger_direct
+        real_nn = _ct._celltype_from_nn
+
+        def spy_ranger(**kw):
+            calls["ranger"] += 1
+            return real_ranger(**kw)
+        def spy_nn(**kw):
+            calls["nn"] += 1
+            return real_nn(**kw)
+
+        import pytest as _pt
+        monkey = _pt.MonkeyPatch()
+        try:
+            monkey.setattr(_ct, "_celltype_from_xenium_ranger_direct", spy_ranger)
+            monkey.setattr(_ct, "_celltype_from_nn", spy_nn)
+            run_celltyping(
+                sample_id="SAMPLE1",
+                warp_dir=warp_dir,
+                out_dir=out_dir,
+                xenium_h5ad=h5ad_path,
+                proseg_purified_h5ad=None,   # THE routing input
+                celltype_col="celltype",
+                id_col="auto",
+            )
+        finally:
+            monkey.undo()
+
+        assert calls["ranger"] == 1, (
+            "expected _celltype_from_xenium_ranger_direct to fire (new default)"
+        )
+        assert calls["nn"] == 0, (
+            "legacy _celltype_from_nn should NOT fire when "
+            "proseg_purified_h5ad is None (F1 routing fix)"
+        )
+
+    def test_run_celltyping_routes_to_legacy_nn_when_proseg_purified_set(
+        self, tmp_path: Path,
+    ):
+        # Companion to the above: passing --proseg-purified-h5ad
+        # explicitly opts back into the legacy proseg-NN path.
+        from hexenium.stages import celltyping as _ct
+
+        h5ad_path = self._ranger_h5ad(
+            tmp_path, celltype_values=["Tumor", "Fibroblast", "Bcell"],
+        )
+        # Minimal proseg h5ad with celltype + centroids so the legacy
+        # NN path can fit + run without erroring.
+        proseg_path = tmp_path / "proseg_purified.h5ad"
+        proseg_obs = pd.DataFrame(
+            {"celltype": ["Tumor", "Fibroblast", "Bcell"],
+             "centroid_x": [0.0, 10.0, 20.0],
+             "centroid_y": [0.0, 10.0, 20.0]},
+            index=["0", "1", "2"],
+        )
+        ad.AnnData(
+            X=np.zeros((3, 2), dtype=np.float32), obs=proseg_obs,
+        ).write_h5ad(proseg_path)
+
+        warp_dir = tmp_path / "warp"; warp_dir.mkdir()
+        _make_warped_parquet(
+            warp_dir / "he_cell_seg.parquet",
+            xenium_ids=["aaaaafep-1", "lkkgeihi-1", "knjdobdk-1"],
+            # Polygons must be area > `area_threshold_px` (default 20 px²)
+            # or `_clean_boundary_gdf` drops them. 10x10 squares (area
+            # 100) match real warp output scale + skeptic F-A's verified
+            # E2E fixture.
+            polygons=[
+                Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),
+                Polygon([(20, 20), (30, 20), (30, 30), (20, 30)]),
+                Polygon([(40, 40), (50, 40), (50, 50), (40, 50)]),
+            ],
+        )
+        out_dir = tmp_path / "celltyped"; out_dir.mkdir()
+
+        calls = {"nn": 0, "ranger": 0}
+        real_ranger = _ct._celltype_from_xenium_ranger_direct
+        real_nn = _ct._celltype_from_nn
+
+        def spy_ranger(**kw):
+            calls["ranger"] += 1
+            return real_ranger(**kw)
+        def spy_nn(**kw):
+            calls["nn"] += 1
+            return real_nn(**kw)
+
+        import pytest as _pt
+        monkey = _pt.MonkeyPatch()
+        try:
+            monkey.setattr(_ct, "_celltype_from_xenium_ranger_direct", spy_ranger)
+            monkey.setattr(_ct, "_celltype_from_nn", spy_nn)
+            run_celltyping(
+                sample_id="SAMPLE1",
+                warp_dir=warp_dir,
+                out_dir=out_dir,
+                xenium_h5ad=h5ad_path,
+                proseg_purified_h5ad=proseg_path,   # explicit legacy opt-in
+                celltype_col="auto",
+                id_col="auto",
+            )
+        finally:
+            monkey.undo()
+
+        assert calls["nn"] == 1, (
+            "legacy _celltype_from_nn should fire when "
+            "proseg_purified_h5ad is set explicitly"
+        )
+        assert calls["ranger"] == 0, (
+            "ranger-direct path should NOT fire when the legacy proseg-NN "
+            "was explicitly opted into via --proseg-purified-h5ad"
+        )
+
+
+# ---------------------------------------------------------------------
+# Empty-GeoDataFrame regression (cross-user finding on
+# ``settylab/msetty-nexus#35`` comment ``5356740940``): geopandas'
+# boolean-mask filter degrades an EMPTY GeoDataFrame result to a plain
+# DataFrame, which then crashes the very next ``.geometry.apply()``
+# call in ``_clean_boundary_gdf`` with ``AttributeError``. Realistic
+# triggers include a warp output where every polygon falls below
+# ``area_threshold_px``.
+# ---------------------------------------------------------------------
+class TestCleanBoundaryGdfEmpty:
+    def _seed_gdf(self, polygons, ids):
+        """Build the minimal shape ``_clean_boundary_gdf`` accepts."""
+        import geopandas as _gpd
+        return _gpd.GeoDataFrame(
+            {"xenium_cell_id": ids, "group": ["Tumor"] * len(ids)},
+            geometry=list(polygons), crs=None,
+        )
+
+    def test_all_polygons_below_area_threshold_returns_empty_gdf(self):
+        # Plant polygons whose areas are ALL below the default
+        # area_threshold_px = 20. Step 7 empties `subset`; the fix
+        # must keep the result a GeoDataFrame (not degrade to
+        # DataFrame) through the final-sanity block at step 9.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+        import geopandas as _gpd
+
+        # 2x2 polygons: area = 4 px² each. area_threshold_px default
+        # is 20, so ALL of these will get dropped.
+        polys = [
+            Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),
+            Polygon([(10, 10), (12, 10), (12, 12), (10, 12)]),
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1", "lkkgeihi-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        # No AttributeError. Result is an empty GeoDataFrame with
+        # the expected columns.
+        assert isinstance(result, _gpd.GeoDataFrame), (
+            "expected GeoDataFrame; geopandas may have degraded the "
+            "empty result to DataFrame (the exact msetty-nexus#35 bug)"
+        )
+        assert len(result) == 0
+        assert set(result.columns) >= {"cell_id", "classification",
+                                       "boundary_type", "geometry"}
+
+    def test_starting_from_empty_gdf_returns_empty(self):
+        # Pathological starting state — no polygons at all. The
+        # earlier ROI/notna filters + area filter all pass through
+        # empty; step 9 must not crash.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+        import geopandas as _gpd
+
+        empty_input = _gpd.GeoDataFrame(
+            {"xenium_cell_id": [], "group": []},
+            geometry=[], crs=None,
+        )
+        result = _clean_boundary_gdf(
+            empty_input, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        assert isinstance(result, _gpd.GeoDataFrame)
+        assert len(result) == 0
+
+    def test_rounding_step_survives_empty_subset(self):
+        # Companion: with round_ndigits set, step 8 also runs a
+        # geometry.apply() on an empty subset. Guard covers both
+        # optional-rounding + final-sanity blocks.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+
+        polys = [
+            Polygon([(0, 0), (2, 0), (2, 2), (0, 2)]),  # area 4
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=2,
+        )
+        assert len(result) == 0
+
+    def test_mixed_pass_and_fail_still_works(self):
+        # Companion happy-adjacent: one polygon above threshold, one
+        # below. Result should retain the one above; and NOT crash
+        # even though the internal `subset.geometry.area >
+        # threshold` mask has a False.
+        from hexenium.stages.celltyping import _clean_boundary_gdf
+
+        polys = [
+            Polygon([(0, 0), (10, 0), (10, 10), (0, 10)]),  # area 100 > 20
+            Polygon([(20, 20), (22, 20), (22, 22), (20, 22)]),  # area 4 < 20
+        ]
+        gdf = self._seed_gdf(polys, ["aaaaafep-1", "lkkgeihi-1"])
+        result = _clean_boundary_gdf(
+            gdf, id_col="xenium_cell_id", class_col="group",
+            boundary_type="cell", area_threshold_px=20.0,
+            round_ndigits=None,
+        )
+        assert len(result) == 1
+        assert result["cell_id"].iloc[0] == "aaaaafep-1"

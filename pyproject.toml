@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hexenium"
-version = "0.2.0"
+version = "0.2.5"
 description = "H&E ↔ Xenium DAPI registration + warp + celltyping + visualisation pipeline."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -26,31 +26,43 @@ classifiers = [
 
 # Pins mirror the tested `heRegistration` conda env
 # (environments/heRegistration.yml). The heavy image-registration
-# libraries (valis-wsi, valis-hest, hest) may need to be installed
-# outside a plain `pip install`; the environment.yml carries the
-# full set including the git-installed HEST.
+# libraries (valis-wsi, valis-hest, hest) are pip-only and need
+# `--no-deps` (see the yaml header); a plain `pip install .`
+# outside the conda env will refuse to install valis-wsi against
+# pandas>=2 because valis-wsi 1.1's declared Requires-Dist caps
+# pandas<2. Use the conda env for reproducible installs; keep the
+# pyproject deps loose so `pip install -e .` inside that env does
+# not attempt to downgrade the working-env versions.
 dependencies = [
-    "numpy==1.26.4",
+    "numpy<2",
+    "pandas<3",
     "scipy",
-    "pandas",
-    "pyarrow==23.*",
+    "pyarrow",
     "pyyaml",
-    "matplotlib==3.10.*",
-    "scikit-image==0.19.*",
-    "scikit-learn==1.8.*",
-    "shapely==2.1.*",
-    "geopandas==1.1.*",
-    "dask==2026.1.*",
-    "dask-geopandas==0.5.*",
+    "matplotlib",
+    "scikit-image",
+    "scikit-learn",
+    "shapely",
+    "geopandas",
+    "dask",
+    "dask-geopandas",
     "distributed",
-    "openslide-python==1.4.*",
-    "tifffile==2026.1.*",
-    "anndata==0.11.*",
-    "scanpy==1.11.*",
-    "opencv-python",
-    "jpype1==1.6.*",
-    "valis-wsi==1.1",
-    "valis-hest==0.0.2",
+    "openslide-python",
+    "tifffile",
+    "anndata",
+    "scanpy",
+    # OpenCV: MUST be `opencv-contrib-python` (NOT stock `opencv-python`).
+    # `valis_hest.feature_detectors` imports `cv2.xfeatures2d.VGG_create`
+    # + other non-free algorithms that only exist in the contrib variant.
+    # The four opencv PyPI packages (stock / contrib × headless / not)
+    # install into the SAME `cv2/` directory and are meant to be mutually
+    # exclusive: declaring stock here means `pip install .` (or the
+    # editable equivalent) reinstalls stock over any contrib variant a
+    # separate `pip install --no-deps -r requirements.txt` step landed,
+    # and `cv2.xfeatures2d` loads empty. Full diagnostic:
+    # https://github.com/settylab/TracyY123-nexus/issues/15#issuecomment-5351293103
+    "opencv-contrib-python",
+    "jpype1",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +77,15 @@ Issues = "https://github.com/settylab/xenium-he-registration/issues"
 Repository = "https://github.com/settylab/xenium-he-registration"
 
 [tool.setuptools.package-data]
-hexenium = ["../../config/default.yaml"]
+# Ship the default config INSIDE the package so it resolves via
+# importlib.resources for both editable AND non-editable installs.
+# The historic ``hexenium = ["../../config/default.yaml"]`` pattern
+# was invalid setuptools syntax (relative paths with ``..`` are not
+# supported) — the wheel silently omitted the file, and `pip install .`
+# from a clone would fail at first `hexenium run` on a
+# FileNotFoundError. Cross-user report at
+# ``settylab/TracyY123-nexus#15`` comment ``5360185231``.
+"hexenium._defaults" = ["*.yaml"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

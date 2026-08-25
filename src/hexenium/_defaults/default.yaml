@@ -4,8 +4,11 @@
 
 # ----- I/O ----------------------------------------------------------
 # Three invocation modes:
-#   * standalone            — sample_id + he_path + xenium_bundle + output_root
-#                             (+ proseg_purified_h5ad for the celltype stage).
+#   * standalone            — sample_id + he_path + xenium_bundle + output_root.
+#                             Neither xenium_h5ad nor proseg_purified_h5ad is
+#                             enforced for the celltype stage -- omitting both
+#                             falls through to an UNLABELED fallback rather
+#                             than erroring (see "Cell-type annotation" below).
 #   * integrated-by-run-id  — same, plus run_id. Derives the xenium h5ad from
 #                             <output_root>/<sample>/<sample>_<run_id>/spatial_adata/
 #                             <sample>_xenium_ranger.h5ad and colocates outputs under
@@ -22,8 +25,11 @@ xenium_bundle: null              # REQUIRED on CLI: dir holding morphology_focus
 # becomes the celltype QUERY side. Leave null for standalone.
 xenium_h5ad: null
 # The upstream proseg_purified h5ad. Its .obs carries the celltype
-# labels + centroids that get NN-mapped onto every xenium cell.
-# REQUIRED for the celltype stage.
+# labels + centroids that get NN-mapped onto every xenium cell -- but
+# only when xenium_h5ad is ALSO set (the legacy NN path; see
+# "Cell-type annotation" below). NOT required: with neither this nor
+# xenium_h5ad set, celltype falls through to UNLABELED instead of
+# erroring.
 proseg_purified_h5ad: null
 # DAPI / morphology image used as the moving image for registration.
 # If null, derives from <xenium_bundle>/morphology_focus/morphology_focus_0000.ome.tif
@@ -127,20 +133,45 @@ warp:
     jvm_mem_gb: 1
 
 # ----- Cell-type annotation ----------------------------------------
-# Source of celltype is the upstream proseg_purified.h5ad (fitted on
-# its centroids + celltype .obs column); query is xenium_h5ad. Every
-# xenium cell is labelled — no mark_unassigned policy.
+# Default source: read celltype labels DIRECTLY from
+# ``xenium_ranger.h5ad``'s ``.obs[<celltype_col>]``. Post
+# xenium-preprocess's ``rctd-split celltype_writeback`` stage (default
+# column ``celltype`` per ``packages/rctd-split/config/default.yaml:172``),
+# the ranger h5ad already carries the labels — no NN fit needed, and
+# the H&E overlay uses THE SAME labels the upstream summary reports use
+# (zero drift risk).
+#
+# Legacy proseg-NN source: pass ``--proseg-purified-h5ad <path>``
+# EXPLICITLY (in addition to ``xenium_h5ad``/``--xenium-h5ad`` --
+# proseg alone does nothing) to switch to the original
+# nearest-neighbour mapping from ``proseg_purified.h5ad``'s centroids
+# + celltype column onto every xenium cell. Kept for standalone-mode
+# users who don't run xenium-preprocess's rctd-split, or for a fresh
+# NN fit against a custom proseg reference. The pipeline no longer
+# AUTO-derives the proseg path from the run dir (removed on skeptic
+# F1) — the CLI flag is now a real opt-in signal.
+#
+# Missing / all-NaN celltype column on the chosen source h5ad falls
+# gracefully to the ``unlabeled`` sentinel (viz palette maps this
+# to grey #888888). No KeyError.
 celltype:
   # Path override for the query xenium h5ad. Falls back to the
   # top-level `xenium_h5ad:` key (integrated mode) if null.
   xenium_h5ad: null
-  # Path override for the source proseg_purified h5ad. Falls back to
-  # the top-level `proseg_purified_h5ad:` key if null.
+  # Path override for the LEGACY proseg-NN source. Falls back to the
+  # top-level `proseg_purified_h5ad:` key if null. Explicit override
+  # (either here or via `--proseg-purified-h5ad`) is the only signal
+  # that opts into the legacy NN path; standard ranger-direct default
+  # requires this to stay unset.
   proseg_purified_h5ad: null
-  # Auto-detect precedence for the celltype .obs column on
-  # proseg_purified.h5ad: celltype > first_type > primary_cell_type >
-  # celltype_updated. Pass a literal column name to force a choice.
-  celltype_col: auto
+  # Column on the source h5ad that carries per-cell celltype labels.
+  # Default `celltype` matches xenium-preprocess's rctd-split
+  # `celltype_writeback` default (writes .obs["celltype"] onto
+  # xenium_ranger.h5ad). Set to `auto` for the historic precedence
+  # walk (celltype > first_type > primary_cell_type >
+  # celltype_updated). Missing / all-NaN → `unlabeled` fallback
+  # (rendered as grey #888888 by viz).
+  celltype_col: celltype
   # Auto-detect precedence for the xenium-side id column. Every
   # candidate is UUID-shape-checked (regex ^[a-z]{8}-\d+$) before use,
   # so this can't silently pick Proseg's int64 index masquerading as
@@ -182,15 +213,30 @@ viz:
   enabled: true
   thumbnail_max_dim: 4096        # downsample H&E to this max dimension for plotting
   dpi: 200
-  cell_alpha: 0.3
+  # cell_alpha/he_alpha/cell_edge_linewidth/render_boundaries below were
+  # changed from their original values (0.3 / 1.0 / 0.0 / nucleus) on an
+  # operator-approved MH8 overlay readability review
+  # (settylab/msetty-nexus#36): at the old defaults, cell types were
+  # effectively invisible (sub-pixel unfilled nucleus outlines at typical
+  # thumbnail resolutions). This is a deliberate default behaviour change,
+  # not an additive opt-in — override any of the four to restore the old
+  # look (cell_alpha: 0.3, he_alpha: 1.0, cell_edge_linewidth: 0.0,
+  # render_boundaries: nucleus).
+  cell_alpha: 0.85
   nucleus_alpha: 0.6
-  # Which boundaries to draw on the overlay. Default is `nucleus` —
-  # nuclei alone give the cleanest read of registration quality against
-  # H&E's hematoxylin-stained nuclei.
-  # `cell`    — only cell polygons (semi-transparent fill).
+  # Opacity of the H&E background image itself (1.0 = full strength).
+  # Lower it to make cell/nucleus fills read as more prominent against a
+  # dimmer H&E, without touching their own alpha.
+  he_alpha: 0.5
+  # Stroke width (points) around cell polygon fills (0.0 = no stroke).
+  # Increases a cell's apparent on-screen size when the fill alone is
+  # near sub-pixel at coarse thumbnail resolutions.
+  cell_edge_linewidth: 0.1
+  # Which boundaries to draw on the overlay.
+  # `cell`    — cell polygons (opaque fill + thin stroke by default).
   # `nucleus` — only nucleus outlines.
   # `both`    — nuclei + cell polygons.
-  render_boundaries: nucleus     # cell | nucleus | both
+  render_boundaries: cell     # cell | nucleus | both
   # classification_palette: OPTIONAL overrides for specific labels. Any
   # celltype that isn't listed here gets a color auto-assigned from
   # `palette_cmap` (see below) at run time — so the viz always colors
