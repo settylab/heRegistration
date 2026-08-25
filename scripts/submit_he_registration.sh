@@ -306,12 +306,21 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     fi
     LOG_LEAF_TMPL="${SAMPLE_ID}_%j_${STAGES_SUFFIX}"
     mkdir -p "$LOG_DIR_BASE"
+    # Resolve this script's own scripts/ dir here (interactive shell —
+    # BASH_SOURCE[0] is reliable), and forward it via --export so the
+    # sbatch body (see line ~388 below) can source lib/env_config.sh
+    # from the real repo tree, not from Slurm's per-job tmp copy of the
+    # script at /var/tmp/slurmd/job<id>/slurm_script/ (which does NOT
+    # include the surrounding scripts/lib/ dir).
+    HEREG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    export HEREG_SCRIPT_DIR
     # Assemble the sbatch call. If conversion was queued, wire the
     # afterok dependency in so hexenium starts only after the
     # conversion job SUCCEEDS (afterok, not afterany).
     _sbatch_args=(--parsable --hold
                   --output="$LOG_DIR_BASE/${LOG_LEAF_TMPL}/slurm-%j.out"
-                  --error="$LOG_DIR_BASE/${LOG_LEAF_TMPL}/slurm-%j.err")
+                  --error="$LOG_DIR_BASE/${LOG_LEAF_TMPL}/slurm-%j.err"
+                  --export=ALL,HEREG_SCRIPT_DIR="$HEREG_SCRIPT_DIR")
     if [[ -n "$CONV_JOBID" ]]; then
         _sbatch_args+=(--dependency="afterok:$CONV_JOBID"
                        --kill-on-invalid-dep=yes)
@@ -385,7 +394,19 @@ if [[ -n "$_env_name_cli" || -n "${ENV_NAME:-}" ]]; then
     echo "[submit]   --env-prefix <path> to point at a different env." >&2
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Under Slurm the script body runs from a per-job tmp copy at
+# /var/tmp/slurmd/job<id>/slurm_script; BASH_SOURCE[0] there points at
+# that copy, so `dirname` gives a path with no sibling lib/ dir. Prefer
+# HEREG_SCRIPT_DIR (forwarded via --export by the pre-sbatch section)
+# when it's set AND names a scripts/ dir that actually has our
+# lib/env_config.sh; fall back to BASH_SOURCE for the case where this
+# body runs interactively (e.g. `bash scripts/submit_he_registration.sh
+# --dry-run` outside of a Slurm dispatch).
+if [[ -n "${HEREG_SCRIPT_DIR:-}" && -f "$HEREG_SCRIPT_DIR/lib/env_config.sh" ]]; then
+    SCRIPT_DIR="$HEREG_SCRIPT_DIR"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 # shellcheck source=lib/env_config.sh
 source "$SCRIPT_DIR/lib/env_config.sh"
 
