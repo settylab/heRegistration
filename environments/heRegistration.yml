@@ -99,6 +99,14 @@ dependencies:
   # on first use.
   - openjdk=11
 
+  # === C/C++ toolchain for scikit-image==0.19.3 source build ===
+  # Python 3.11 installs scikit-image 0.19.3 from sdist. A modern
+  # compiler/libstdc++ is needed for the Pythran/xsimd build path,
+  # which requires the <version> standard-library header.
+  - gcc_linux-64=11.3
+  - gxx_linux-64=11.3
+  - binutils_linux-64
+
   - pip
 
   # NOTE: the pip: block that used to live here was factored OUT into
