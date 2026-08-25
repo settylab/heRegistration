@@ -106,8 +106,16 @@ fi
 ENV_PREFIX=$(cd "$ENV_PREFIX" && pwd)   # canonicalize to an absolute path
 
 if [[ -z "$MICROMAMBA_BIN" ]]; then
-    if ! MICROMAMBA_BIN=$(command -v micromamba); then
-        echo "error: micromamba not found on PATH and --micromamba-bin not given." >&2
+    # Resolve precedence: --micromamba-bin (already set above if given) →
+    # $MAMBA_EXE (exported by micromamba's shell-hook to the exact binary
+    # the hook sourced — known-working by construction) → command -v.
+    # Preferring $MAMBA_EXE over PATH catches the shadowed / wrong-arch
+    # case where an earlier PATH entry (e.g. a stale ~/bin/micromamba
+    # from another machine) fails with `Exec format error` on exec.
+    if [[ -n "${MAMBA_EXE:-}" && -x "$MAMBA_EXE" ]]; then
+        MICROMAMBA_BIN="$MAMBA_EXE"
+    elif ! MICROMAMBA_BIN=$(command -v micromamba); then
+        echo "error: micromamba not found on PATH, \$MAMBA_EXE not set, and --micromamba-bin not given." >&2
         exit 4
     fi
 fi
