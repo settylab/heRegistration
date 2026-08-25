@@ -57,8 +57,17 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-if ! command -v micromamba >/dev/null 2>&1; then
-    echo "error: [create-env] micromamba not found on PATH." >&2
+# Resolve the micromamba binary. Prefer $MAMBA_EXE (exported by
+# micromamba's shell-hook to the exact binary that sourced the hook —
+# known-working by construction) over a bare PATH lookup; a shadowed
+# or wrong-arch `micromamba` earlier on PATH would otherwise fail
+# with `Exec format error` on exec, well after `command -v` was happy.
+if [[ -n "${MAMBA_EXE:-}" && -x "$MAMBA_EXE" ]]; then
+    MAMBA_BIN="$MAMBA_EXE"
+elif MAMBA_BIN=$(command -v micromamba 2>/dev/null); then
+    :
+else
+    echo "error: [create-env] micromamba not found (\$MAMBA_EXE unset and not on PATH)." >&2
     exit 4
 fi
 
@@ -90,7 +99,7 @@ record_env_prefix() {
     if [[ -n "${MAMBA_ROOT_PREFIX:-}" ]]; then
         envs_dir="$MAMBA_ROOT_PREFIX/envs"
     else
-        envs_dir=$(micromamba info | sed -n 's/^[[:space:]]*envs directories[[:space:]]*:[[:space:]]*//p' | head -1)
+        envs_dir=$("$MAMBA_BIN" info | sed -n 's/^[[:space:]]*envs directories[[:space:]]*:[[:space:]]*//p' | head -1)
     fi
     if [[ -z "$envs_dir" ]]; then
         echo "[create-env] warning: could not resolve the envs directory; skipping env-prefix receipt." >&2
@@ -105,7 +114,7 @@ record_env_prefix() {
 
 if [[ -z "${MAMBA_ROOT_PREFIX:-}" ]]; then
     echo "[create-env] MAMBA_ROOT_PREFIX not set — using micromamba's default root; nothing to isolate."
-    micromamba "$@"
+    "$MAMBA_BIN" "$@"
     record_env_prefix
     exit 0
 fi
@@ -123,7 +132,7 @@ echo "[create-env] CONDA_PKGS_DIRS=$CONDA_PKGS_DIRS"
 MARKER=$(mktemp)
 trap 'rm -f "$MARKER"' EXIT
 
-micromamba "$@"
+"$MAMBA_BIN" "$@"
 
 if [[ -d "$HOME_PKGS" ]]; then
     TOUCHED=$(find "$HOME_PKGS" -newer "$MARKER" 2>/dev/null || true)
