@@ -3,6 +3,56 @@
 All notable changes to hexenium will be documented here. Follows
 [Keep a Changelog](https://keepachangelog.com/) shape.
 
+## [0.2.6] — 2026-08-26
+
+Patch release: defensive env-config resolution + Slurm-side hardening
+of the sbatch wrappers. `scripts/*.sh` and `docs/install.md` only — no
+changes under `src/hexenium/`, no CLI-surface changes.
+
+### Fixed
+
+- `scripts/create-env.sh` (`dd2dac5`): prefer `$MAMBA_EXE` over
+  `command -v micromamba` when `--micromamba-bin` isn't given. A
+  shadowed / wrong-arch `micromamba` earlier on `PATH` (e.g. a stale
+  `~/bin/micromamba` copied from another machine) passes `command -v`
+  cleanly, then fails with `Exec format error` at exec — well after
+  the guard is happy. `$MAMBA_EXE` is exported by micromamba's
+  shell-hook to the exact binary the hook sourced, so it's
+  known-working by construction. Ref
+  `settylab/TracyY123-nexus#26` comment 5417538704.
+- `scripts/write-env-config.sh` (`61fd6a0`): companion fix — same
+  three-level resolution (`--micromamba-bin` → `$MAMBA_EXE` →
+  `command -v micromamba`) applied to the sibling script.
+- `scripts/submit_vsi_to_ometiff.sh` (`a2cd158`): wrap `micromamba
+  activate` in `set +u` / `set -u` for conda-forge compiler
+  compatibility. The activate script references unbound variables
+  that fire under the wrapper's `-u`; save/restore lets the
+  compiler-toolchain activation complete cleanly.
+- `scripts/submit_he_registration.sh` (`3084cd3`): same `+u`/`-u`
+  wrap around `micromamba activate` in the he-registration sbatch
+  wrapper.
+- `scripts/env-preflight.sh` (`23d8a97`): same `+u`/`-u` wrap in the
+  env-preflight helper.
+- `scripts/submit_he_registration.sh` (`dcea561`): forward
+  `SCRIPT_DIR` through `sbatch` so `lib/env_config.sh` sources
+  cleanly under Slurm (Slurm's fresh env dropped the caller's
+  `SCRIPT_DIR`, leaving the source path unresolved).
+- `scripts/pip-install.sh` (`89320bf`): exclude
+  `~/.cache/pip/selfcheck/` from the isolation-assertion sweep. The
+  assertion was flagging an incidental pip-selfcheck file as a
+  cache-isolation violation.
+
+### Docs
+
+- `docs/install.md` (`9fc3430`): troubleshooting entry for
+  scikit-image sdist build failures.
+
+_Note: an earlier compiler-toolchain addition on this branch
+(`c2b8373` — `env: add GCC 11.3 + gxx + binutils_linux-64 for
+scikit-image==0.19.3 sdist build`) was reverted by `4242f92` before
+this release; net delta on the tree is zero and it is not listed
+above._
+
 ## [0.2.0] — 2026-08-17
 
 ### Added

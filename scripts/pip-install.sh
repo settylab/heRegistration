@@ -56,7 +56,14 @@ trap 'rm -f "$MARKER"' EXIT
 pip install "$@"
 
 if [[ -d "$HOME_PIP_CACHE" ]]; then
-    TOUCHED=$(find "$HOME_PIP_CACHE" -newer "$MARKER" 2>/dev/null || true)
+    # Exclude ~/.cache/pip/selfcheck/ — pip's version-check timestamp
+    # file writes there unconditionally (hardcoded in
+    # pip._internal.self_outdated_check, NOT controlled by
+    # PIP_CACHE_DIR). It has no cache-semantics impact — it just records
+    # "when did I last check whether a newer pip exists". Users who want
+    # to suppress it can also set PIP_DISABLE_PIP_VERSION_CHECK=1 in
+    # their environment.
+    TOUCHED=$(find "$HOME_PIP_CACHE" -newer "$MARKER" ! -path '*/selfcheck*' 2>/dev/null || true)
     if [[ -n "$TOUCHED" ]]; then
         echo "error: [pip-install] $HOME_PIP_CACHE was modified during pip install" >&2
         echo "       despite PIP_CACHE_DIR=$PIP_CACHE_DIR — isolation did NOT hold." >&2

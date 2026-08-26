@@ -344,6 +344,14 @@ invocation mode.
   hitting this, verify line 1 of `environments/heRegistration-requirements.txt`
   is `hest @ git+https://github.com/mahmoodlab/HEST.git@v1.2.0` and
   not an unpinned `hest @ git+…HEST.git`.
+- **`fatal error: version: No such file or directory`** during step 4
+  at scikit-image build. The env pins
+  `gcc_linux-64=11.3` / `gxx_linux-64=11.3` / `binutils_linux-64` to
+  build `scikit-image==0.19.3` from sdist; if those pins are absent
+  from the solved env (customized yml or partial solve), restore them
+  with `micromamba install -n heRegistration -c conda-forge
+  gcc_linux-64=11.3 gxx_linux-64=11.3 binutils_linux-64` and re-run
+  step 4.
 - **`hexenium` command not found** after step 5 succeeds. The wrong
   env is active — `which hexenium` and re-run `micromamba activate
   heRegistration`.

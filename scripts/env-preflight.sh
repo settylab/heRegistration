@@ -42,10 +42,20 @@ echo "[env-preflight]   BFTOOLS_ROOT=${BFTOOLS_ROOT:-<unset>}"
 echo "[env-preflight]   LIBBLOSC_DIR=${LIBBLOSC_DIR:-<unset>}"
 
 eval "$("$MICROMAMBA_BIN" shell hook --shell bash)"
+# `micromamba activate` sources conda's activate/deactivate.d/*.sh
+# scripts, some of which (e.g. conda-forge's `gxx_linux-64` deactivate)
+# reference `CONDA_BACKUP_*` vars unconditionally — those are only
+# defined when the corresponding original var (CXX etc.) was set BEFORE
+# activation, so a fresh shell trips `set -u`. Disable nounset around
+# the activate call only, so those conda scripts can run in their
+# expected permissive context; re-enable it right after for the rest of
+# this preflight's own logic.
+set +u
 if ! micromamba activate "$HEREG_ENV_PREFIX"; then
     echo "error: [env-preflight] micromamba activate failed for prefix: $HEREG_ENV_PREFIX" >&2
     exit 5
 fi
+set -u
 
 if ! command -v hexenium >/dev/null 2>&1; then
     echo "error: [env-preflight] 'hexenium' is not installed in env: $HEREG_ENV_PREFIX" >&2

@@ -161,11 +161,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/env_config.sh"
 
 eval "$("$MICROMAMBA_BIN" shell hook --shell bash)"
+# `micromamba activate` sources conda-forge's activate.d/*.sh scripts;
+# gxx_linux-64 and binutils_linux-64 (both in environments/heRegistration.yml)
+# read $CXX / $ADDR2LINE / $AR / ... unconditionally under `set -u`, tripping
+# on a fresh compute-node shell where those vars are never set. Wrap the
+# activate call only; re-enable set -u for the rest of the sbatch body's
+# own logic. Parallel to env-preflight's fix (23d8a97).
+set +u
 if ! micromamba activate "$HEREG_ENV_PREFIX"; then
     echo "ERROR: micromamba activate failed for prefix: $HEREG_ENV_PREFIX" >&2
     echo "  Re-run scripts/write-env-config.sh to verify/regenerate env.local.conf." >&2
     exit 1
 fi
+set -u
 
 echo "[vsi2ometiff] env activated: $HEREG_ENV_PREFIX (CONDA_PREFIX=$CONDA_PREFIX)"
 echo "[vsi2ometiff] python:        $(command -v python)"
