@@ -87,6 +87,7 @@ def run_registration(
     check_for_reflections: bool = True,
     create_masks: bool = False,
     align_to_reference: bool = True,
+    strict_metadata_check: bool = True,
     max_image_dim_px: int = 1500,
     max_processed_image_dim_px: int = 1500,
     max_non_rigid_registration_dim_px: int = 10000,
@@ -123,6 +124,7 @@ def run_registration(
     from hest.utils import get_name_datetime  # type: ignore
 
     from hexenium._internal.he_slide_reader import OMEAwareSlideReaderAdapter
+    from hexenium._internal.metadata_check import validate_registration_inputs
 
     if micro_rigid_registrar_params is None:
         micro_rigid_registrar_params = {}
@@ -226,6 +228,18 @@ def run_registration(
     log(f"[registration] mode={mode} (do_nonrigid={do_nonrigid}, do_micro={do_micro})")
     log(f"[registration] he_for_valis={he_for_valis}")
     log(f"[registration] dapi_path={dapi_path}")
+
+    # Pre-registration metadata validation. In strict mode a bad OME
+    # PhysicalSize fails BEFORE VALIS starts; in non-strict mode the
+    # same checks emit WARNINGs and registration proceeds. Either way
+    # the resolved values + their source (`OME metadata` /
+    # `HEST fallback`) are logged so the slurm .out file records
+    # exactly what VALIS ended up using.
+    validate_registration_inputs(
+        he_for_valis, dapi_path,
+        strict=strict_metadata_check, log=log,
+    )
+
     log(f"[registration] init_jvm() ...")
     registration.init_jvm()
     log(f"[registration] JVM started; constructing Valis(...)")

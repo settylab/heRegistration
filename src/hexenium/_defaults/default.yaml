@@ -94,6 +94,15 @@ registration:
   check_for_reflections: true    # Catches mirror/flip failures cheaply.
   create_masks: false            # Auto-mask can over-mask small tissue islands.
   align_to_reference: true       # H&E is the reference image.
+  # Pre-registration OME PhysicalSize validation. When true (the
+  # default), a missing / out-of-range / obviously-wrong OME
+  # PhysicalSize on either the H&E or the DAPI aborts the run BEFORE
+  # VALIS starts — cheaper than eating a 30-60 min VALIS run and
+  # producing a misregistered result. Override with
+  # `--strict-metadata-check false` on the CLI (or set this to `false`
+  # in the YAML) for an intentional debug run against a file with
+  # metadata you know is off.
+  strict_metadata_check: true
 
 # ----- Numeric algorithm parameters --------------------------------
 parameters:

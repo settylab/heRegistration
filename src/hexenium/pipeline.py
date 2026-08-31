@@ -503,6 +503,7 @@ def run(cfg: dict, stages: list[str], argv: list[str]) -> int:
             check_for_reflections=reg["check_for_reflections"],
             create_masks=reg["create_masks"],
             align_to_reference=reg["align_to_reference"],
+            strict_metadata_check=reg["strict_metadata_check"],
             max_image_dim_px=params["max_image_dim_px"],
             max_processed_image_dim_px=params["max_processed_image_dim_px"],
             max_non_rigid_registration_dim_px=params["max_non_rigid_registration_dim_px"],

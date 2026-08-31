@@ -155,6 +155,11 @@ def _add_run_args(p: argparse.ArgumentParser) -> None:
                         "(YAML default: true; override with false on "
                         "faint-hematoxylin samples).")
     p.add_argument("--check-for-reflections", type=_str2bool, default=None)
+    p.add_argument("--strict-metadata-check", type=_str2bool, default=None,
+                   help="Fail-fast on missing / out-of-range OME "
+                        "PhysicalSize before VALIS runs. YAML default: "
+                        "true. Set false for intentional debug runs "
+                        "against files with known-bad metadata.")
     p.add_argument("--create-masks", type=_str2bool, default=None)
     p.add_argument("--align-to-reference", type=_str2bool, default=None)
     p.add_argument("--max-image-dim-px", type=int, default=None,
@@ -307,6 +312,8 @@ def _resolve_config(args: argparse.Namespace) -> dict:
         reg_over["create_masks"] = args.create_masks
     if args.align_to_reference is not None:
         reg_over["align_to_reference"] = args.align_to_reference
+    if args.strict_metadata_check is not None:
+        reg_over["strict_metadata_check"] = args.strict_metadata_check
     if reg_over:
         overrides["registration"] = reg_over
     param_over = {}
