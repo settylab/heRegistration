@@ -182,6 +182,40 @@ def _subset_anndata(
     return int(mask.sum()), int(len(mask))
 
 
+def _annotate_source_h5ad(
+    src_path: Path,
+    rois_polygons_ordered: list[tuple[str, BaseGeometry]],
+    out_path: Path,
+) -> tuple[int, int]:
+    """Write ``<out_path>`` = full uncut h5ad + ``obs['roi_annotation']``.
+
+    Never mutates the source file. Reads it once, iterates ROIs in the
+    order the caller supplies, computes per-cell membership against
+    each ROI polygon, and joins names with commas for cells inside
+    multiple ROIs. Cells outside every ROI get the literal ``outside``.
+
+    Returns ``(n_annotated_inside_any_roi, n_total)``.
+    """
+    adata = _read_anndata(src_path)
+    coords = _resolve_centroids_um(adata, side_name=src_path.name)
+    n = int(len(coords))
+    xs, ys = coords[:, 0], coords[:, 1]
+
+    per_cell: list[list[str]] = [[] for _ in range(n)]
+    for name, poly in rois_polygons_ordered:
+        mask = _centroid_mask_xy(xs, ys, poly)
+        for i in np.where(mask)[0]:
+            per_cell[i].append(name)
+
+    annotation = np.array(
+        [",".join(m) if m else "outside" for m in per_cell],
+        dtype=object,
+    )
+    adata.obs["roi_annotation"] = pd.Categorical(annotation)
+    adata.write_h5ad(str(out_path))
+    return int(sum(1 for m in per_cell if m)), n
+
+
 def _subset_boundary_parquet(
     bundle: Path,
     stem: str,
@@ -482,8 +516,39 @@ def run_a1(config: SubsetConfig) -> list[Path]:
         written_dirs.append(roi_dir)
         logger.info("[a1] roi=%r wrote %s", spec.name, roi_dir)
 
+    if config.outputs.annotate_source_h5ad:
+        _write_annotated_source_copies(config, out_root, pixel_size_morph)
+
     _write_run_summary(out_root, config, written_dirs)
     return written_dirs
+
+
+def _write_annotated_source_copies(
+    config: SubsetConfig,
+    out_root: Path,
+    pixel_size_morph: float,
+) -> None:
+    """One annotated copy per configured h5ad, holding all cells.
+
+    Iterates ROIs in config order so overlaps stringify deterministically
+    (`obs['roi_annotation'] == "Left,Center"`, never `"Center,Left"`).
+    Source files are never modified — the copy lives at
+    ``<output_dir>/<stem>_roi_annotated.h5ad``.
+    """
+    inputs = list(_iter_configured_anndata_inputs(config))
+    if not inputs:
+        return
+    rois_polygons = [
+        (spec.name, _load_roi_polygon_um(spec, pixel_size_morph))
+        for spec in config.rois
+    ]
+    for stem, src in inputs:
+        out = out_root / f"{stem}_roi_annotated.h5ad"
+        n_inside, n_total = _annotate_source_h5ad(src, rois_polygons, out)
+        logger.info(
+            "[a1] annotated %s → %s (%d of %d cells inside at least one ROI)",
+            src.name, out, n_inside, n_total,
+        )
 
 
 def _write_run_summary(

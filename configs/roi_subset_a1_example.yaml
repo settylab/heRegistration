@@ -18,9 +18,12 @@ mode: a1
 xenium_bundle: /fh/fast/setty_m/metx_liver_met/Haffner_Transfer_06012026/TMA111A_prostate
 output_dir:    /fh/fast/setty_m/user/ryang/xenium_bundle_subset_test/a1_run
 
-# Optional AnnData inputs — subsetted per ROI at
-# <roi_dir>/<stem>.h5ad. Any of the three may be omitted; A1 still
-# runs when none are set.
+# Optional AnnData inputs — subsetted per ROI at <roi_dir>/<stem>.h5ad
+# and (when outputs.annotate_source_h5ad is true) also copied verbatim
+# to <output_dir>/<stem>_roi_annotated.h5ad with a per-cell
+# obs['roi_annotation'] column ("<roi_name>", comma-joined in config
+# order for cells in multiple ROIs, "outside" otherwise). Any of the
+# three may be omitted — A1 still runs.
 # xenium_ranger_h5ad:   /path/to/spatial_adata/<sample>_xenium_ranger.h5ad
 # proseg_purified_h5ad: /path/to/spatial_adata/<sample>_proseg_purified.h5ad
 # proseg_raw_h5ad:      /path/to/spatial_adata/<sample>_proseg_raw.h5ad

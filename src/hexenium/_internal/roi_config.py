@@ -51,6 +51,11 @@ class Outputs:
     # reserved for a future ROI-recenter path; requesting it raises
     # NotImplementedError so callers don't silently get global data.
     anndata_geometry_frame: GeometryFrame = "global"
+    # When True, and any of the three optional h5ad paths on
+    # SubsetConfig is populated, write annotated copies of the FULL
+    # (unsubsetted) inputs to <output_dir>/<stem>_roi_annotated.h5ad
+    # with a per-cell `obs["roi_annotation"]` column.
+    annotate_source_h5ad: bool = True
 
 
 @dataclass
