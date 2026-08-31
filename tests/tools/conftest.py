@@ -92,6 +92,80 @@ def synthetic_bundle(tmp_path: Path) -> Path:
     return bundle
 
 
+# ---------------------------------------------------------------------------
+# Synthetic AnnData fixtures for A1's h5ad path
+# ---------------------------------------------------------------------------
+
+def _make_synthetic_adata(cells: pd.DataFrame, obs_indexed_by_cell_id: bool = True):
+    """Build a small AnnData mirroring cells.parquet's 16-cell grid.
+
+    Preserves the same cell_ids so the A1 subset can cross-check the
+    h5ad-derived selection against cells.parquet's selection.
+
+    Populates enough surface (obs, var, obsm, uns, layers, .raw) that
+    the preservation tests are meaningful.
+    """
+    import anndata as ad
+
+    n_cells = len(cells)
+    n_genes = 5
+    rng = np.random.default_rng(42)
+    X = rng.integers(0, 100, size=(n_cells, n_genes)).astype(np.float32)
+    layer_norm = X / (X.sum(axis=1, keepdims=True) + 1e-9)
+
+    obs = pd.DataFrame({
+        "cell_id": cells["cell_id"].to_numpy(),
+        "x_centroid": cells["x_centroid"].to_numpy(),
+        "y_centroid": cells["y_centroid"].to_numpy(),
+        "transcript_counts": cells["transcript_counts"].to_numpy(),
+    })
+    if obs_indexed_by_cell_id:
+        obs.index = obs["cell_id"].astype(str)
+
+    var = pd.DataFrame({
+        "gene_symbol": [f"GENE_{i}" for i in range(n_genes)],
+        "highly_variable": [True] * n_genes,
+    }, index=[f"ENSG_{i:04d}" for i in range(n_genes)])
+
+    obsm = {"spatial": obs[["x_centroid", "y_centroid"]].to_numpy(np.float64)}
+    uns = {
+        "sample_id": "TMA_synth",
+        "run_id": "run_synth_0",
+        "provenance": {"tool": "conftest-synth", "version": "0"},
+    }
+
+    adata = ad.AnnData(X=X, obs=obs, var=var, obsm=obsm, uns=uns,
+                       layers={"normalized": layer_norm})
+    adata.raw = adata.copy()
+    return adata
+
+
+@pytest.fixture
+def synthetic_h5ad(tmp_path: Path, synthetic_bundle: Path) -> Path:
+    """A minimal xenium-ranger-style h5ad on the same 16-cell grid."""
+    cells = _synthetic_cells()
+    adata = _make_synthetic_adata(cells)
+    path = tmp_path / "TMA_synth_xenium_ranger.h5ad"
+    adata.write_h5ad(str(path))
+    return path
+
+
+@pytest.fixture
+def synthetic_h5ad_no_obsm(tmp_path: Path) -> Path:
+    """Same 16-cell grid but coords via .obs[x_centroid/y_centroid] only.
+
+    Exercises the `_resolve_spatial_coords` fallback branch when
+    ``.obsm['spatial']`` is absent (proseg_raw / early xenium h5ads).
+    """
+    import anndata as ad
+    cells = _synthetic_cells()
+    adata = _make_synthetic_adata(cells)
+    del adata.obsm["spatial"]
+    path = tmp_path / "TMA_synth_no_obsm.h5ad"
+    adata.write_h5ad(str(path))
+    return path
+
+
 @pytest.fixture
 def roi_csv_um(tmp_path: Path) -> Path:
     """QuPath CSV with two overlapping polygons — Left and Center."""

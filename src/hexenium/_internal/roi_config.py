@@ -46,6 +46,11 @@ class Outputs:
     nucleus_boundaries: bool = True
     experiment_xenium: bool = True   # A1: verbatim copy
     geometry_frame: GeometryFrame = "global"
+    # AnnData outputs — independent knob from the GeoJSON `geometry_frame`.
+    # Only ``global`` is implemented today (no coord shift). ``local`` is
+    # reserved for a future ROI-recenter path; requesting it raises
+    # NotImplementedError so callers don't silently get global data.
+    anndata_geometry_frame: GeometryFrame = "global"
 
 
 @dataclass
@@ -69,6 +74,13 @@ class SubsetConfig:
     warp: WarpKnobs = field(default_factory=WarpKnobs)
     he_bundle: Path | None = None            # required for A2 (H&E crop)
     registrar_pickle: Path | None = None     # required for A2 (forward warp)
+    # Optional AnnData inputs. When any is populated, A1 subsets it by
+    # the same physical ROI polygon used for cells.parquet and (when
+    # ``outputs.annotate_source_h5ad`` is True) writes an annotated
+    # copy of the full uncut file to <output_dir>/<stem>_roi_annotated.h5ad.
+    xenium_ranger_h5ad: Path | None = None
+    proseg_purified_h5ad: Path | None = None
+    proseg_raw_h5ad: Path | None = None
     pixel_size_morph: float | None = None
     """Override for pixel_size_morph. When None, read from
     ``<xenium_bundle>/experiment.xenium``; falls back to 0.2125."""
@@ -103,6 +115,18 @@ class SubsetConfig:
             he_bundle=Path(raw["he_bundle"]) if raw.get("he_bundle") else None,
             registrar_pickle=(
                 Path(raw["registrar_pickle"]) if raw.get("registrar_pickle") else None
+            ),
+            xenium_ranger_h5ad=(
+                Path(raw["xenium_ranger_h5ad"])
+                if raw.get("xenium_ranger_h5ad") else None
+            ),
+            proseg_purified_h5ad=(
+                Path(raw["proseg_purified_h5ad"])
+                if raw.get("proseg_purified_h5ad") else None
+            ),
+            proseg_raw_h5ad=(
+                Path(raw["proseg_raw_h5ad"])
+                if raw.get("proseg_raw_h5ad") else None
             ),
             pixel_size_morph=raw.get("pixel_size_morph"),
         )

@@ -88,9 +88,98 @@ def _load_cells(xenium_bundle: Path) -> pd.DataFrame:
     return pd.read_parquet(xenium_bundle / "cells.parquet")
 
 
+def _centroid_mask_xy(
+    xs, ys, polygon_um: BaseGeometry,
+) -> np.ndarray:
+    """Point-in-polygon predicate over arbitrary x/y iterables (microns)."""
+    return np.asarray(gpd.points_from_xy(xs, ys).within(polygon_um))
+
+
 def _centroid_mask(cells: pd.DataFrame, polygon_um: BaseGeometry) -> np.ndarray:
-    points = gpd.points_from_xy(cells["x_centroid"], cells["y_centroid"])
-    return np.asarray(points.within(polygon_um))
+    return _centroid_mask_xy(cells["x_centroid"], cells["y_centroid"], polygon_um)
+
+
+# ---------------------------------------------------------------------------
+# AnnData subsetting (Xenium/Proseg h5ads — all in microns)
+# ---------------------------------------------------------------------------
+
+# Canonical mapping from a config field name to the on-disk stem used
+# for A1's per-ROI + annotated outputs. Ordered — the annotation step
+# iterates in this order for deterministic multi-ROI comma joins.
+ANNDATA_INPUTS: tuple[tuple[str, str], ...] = (
+    ("xenium_ranger_h5ad", "xenium_ranger"),
+    ("proseg_purified_h5ad", "proseg_purified"),
+    ("proseg_raw_h5ad", "proseg_raw"),
+)
+
+
+def _iter_configured_anndata_inputs(config: SubsetConfig):
+    """Yield ``(stem, path)`` for h5ad inputs the caller populated."""
+    for field_name, stem in ANNDATA_INPUTS:
+        path = getattr(config, field_name)
+        if path is not None:
+            yield stem, Path(path)
+
+
+def _read_anndata(src_path: Path):
+    """Lazy import wrapper — keeps anndata out of module-load cost."""
+    import anndata as ad
+    return ad.read_h5ad(str(src_path))
+
+
+def _resolve_centroids_um(adata, side_name: str) -> np.ndarray:
+    """Reuse the celltyping-stage resolver so A1 sees the same coords
+    downstream stages do. Returns (n, 2) [x, y] in microns.
+    """
+    # Local import: hexenium.stages.celltyping pulls in scanpy at import
+    # time; keep it out of A1's module load path.
+    from hexenium.stages.celltyping import _resolve_spatial_coords
+    return _resolve_spatial_coords(adata, side_name=side_name)
+
+
+def _subset_anndata(
+    src_path: Path,
+    polygon_um: BaseGeometry,
+    out_path: Path,
+    anndata_geometry_frame: str,
+) -> tuple[int, int]:
+    """Subset an h5ad by ROI-polygon centroid membership.
+
+    Opens the source in ``backed='r'`` so ``.X``, ``.layers[*]``, and
+    ``.raw`` are HDF5 references rather than materialised arrays.
+    Slicing on the backed view is lazy; ``to_memory()`` materialises
+    only the kept rows — peak RAM tracks the subset size, not the
+    full-file size. On the largest real proseg_raw observed in
+    ``metx_liver_met/anndata/LiverMetx_samples/`` (~33 GB in memory
+    on a full read), a ~4% ROI subset peaks at roughly 1-2 GB.
+
+    Preserves ``obs``, ``var``, ``obsm``, ``uns``, ``layers``, and
+    ``.raw`` via AnnData's own backed slice + ``to_memory()`` +
+    ``write_h5ad`` chain. Coord frame is ``global`` today — no shift.
+    Returns ``(n_kept, n_total)``.
+    """
+    if anndata_geometry_frame != "global":
+        raise NotImplementedError(
+            f"anndata_geometry_frame={anndata_geometry_frame!r} not implemented; "
+            "only 'global' is supported today. Use the parquet/GeoJSON "
+            "``geometry_frame`` for polygon-frame shifting; AnnData coord "
+            "recentering is a future extension."
+        )
+    import anndata as ad
+
+    adata = ad.read_h5ad(str(src_path), backed="r")
+    try:
+        coords = _resolve_centroids_um(adata, side_name=src_path.name)
+        mask = _centroid_mask_xy(coords[:, 0], coords[:, 1], polygon_um)
+        # to_memory() materialises the slice out of the HDF5 backing;
+        # afterwards `sub` no longer references the source file.
+        sub = adata[mask, :].to_memory()
+    finally:
+        f = getattr(adata, "file", None)
+        if f is not None:
+            f.close()
+    sub.write_h5ad(str(out_path))
+    return int(mask.sum()), int(len(mask))
 
 
 def _subset_boundary_parquet(
@@ -200,6 +289,7 @@ def _write_manifest(
     n_cells_total: int,
     sources: dict[str, Any],
     geometry_frame: str,
+    anndata_subsets: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     minx_um, miny_um, maxx_um, maxy_um = polygon_um.bounds
     manifest = {
@@ -219,6 +309,8 @@ def _write_manifest(
             "origin_dapi_um": [x0 * pixel_size_morph, y0 * pixel_size_morph],
             "size_dapi_px": [x1 - x0, y1 - y0],
         }
+    if anndata_subsets:
+        manifest["anndata_subsets"] = anndata_subsets
     with manifest_path.open("w") as f:
         yaml.safe_dump(manifest, f, sort_keys=False)
 
@@ -338,6 +430,37 @@ def run_a1(config: SubsetConfig) -> list[Path]:
             geometry=[polygon_for_geojson],
         ).to_file(roi_dir / "roi.geojson", driver="GeoJSON")
 
+        # Per-ROI h5ad subsets — only the inputs the caller declared.
+        anndata_subsets: dict[str, dict[str, Any]] = {}
+        for stem, src in _iter_configured_anndata_inputs(config):
+            out = roi_dir / f"{stem}.h5ad"
+            n_kept, n_total = _subset_anndata(
+                src, polygon_um, out,
+                anndata_geometry_frame=config.outputs.anndata_geometry_frame,
+            )
+            # QC: the h5ad subset for the xenium_ranger source should
+            # match the cells.parquet subset exactly (same cells,
+            # same ROI polygon). Log a mismatch; don't hard-fail
+            # (proseg h5ads use different segmentations and are
+            # expected to differ from cells.parquet).
+            if stem == "xenium_ranger" and n_kept != len(kept_cells):
+                logger.warning(
+                    "[a1] roi=%r xenium_ranger.h5ad subset kept %d cells but "
+                    "cells.parquet subset kept %d — mismatch suggests a "
+                    "coord-frame drift between the h5ad and cells.parquet",
+                    spec.name, n_kept, len(kept_cells),
+                )
+            anndata_subsets[stem] = {
+                "source": str(src),
+                "output": str(out),
+                "n_kept": n_kept,
+                "n_total": n_total,
+            }
+            logger.info(
+                "[a1] roi=%r %s.h5ad cells: %d of %d kept",
+                spec.name, stem, n_kept, n_total,
+            )
+
         _write_manifest(
             roi_dir / "manifest.yaml",
             roi_name=spec.name,
@@ -346,6 +469,7 @@ def run_a1(config: SubsetConfig) -> list[Path]:
             pixel_size_morph=pixel_size_morph,
             n_cells_kept=len(kept_cells),
             n_cells_total=len(cells),
+            anndata_subsets=anndata_subsets,
             sources={
                 "xenium_bundle": bundle,
                 "roi_path": spec.path,

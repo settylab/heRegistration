@@ -18,6 +18,13 @@ mode: a1
 xenium_bundle: /fh/fast/setty_m/metx_liver_met/Haffner_Transfer_06012026/TMA111A_prostate
 output_dir:    /fh/fast/setty_m/user/ryang/xenium_bundle_subset_test/a1_run
 
+# Optional AnnData inputs — subsetted per ROI at
+# <roi_dir>/<stem>.h5ad. Any of the three may be omitted; A1 still
+# runs when none are set.
+# xenium_ranger_h5ad:   /path/to/spatial_adata/<sample>_xenium_ranger.h5ad
+# proseg_purified_h5ad: /path/to/spatial_adata/<sample>_proseg_purified.h5ad
+# proseg_raw_h5ad:      /path/to/spatial_adata/<sample>_proseg_raw.h5ad
+
 # Optional override — usually left unset (read from experiment.xenium).
 # pixel_size_morph: 0.2125
 
