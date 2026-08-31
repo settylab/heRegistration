@@ -1,0 +1,46 @@
+# Example A1 config — lightweight registration-input subset.
+#
+# Emits, per ROI, the quartet a subsequent `register + warp + viz` run needs:
+#   - dapi_subset.ome.tif        (cropped morphology_focus/ch0000_dapi.ome.tif)
+#   - cell_boundaries.parquet    (long-format, XOA schema preserved)
+#   - nucleus_boundaries.parquet (long-format, XOA schema preserved)
+#   - experiment.xenium          (copied verbatim from the source bundle)
+# plus:
+#   - cells.parquet              (per-cell metrics for cells inside the ROI)
+#   - roi.geojson                (the ROI polygon, in global or local frame)
+#   - manifest.yaml              (crop origin, source paths, cell counts)
+#
+# For B1 / A2 / B2, change `mode:` and populate the extra fields the mode
+# requires (`he_bundle`, `registrar_pickle`).
+
+mode: a1
+
+xenium_bundle: /fh/fast/setty_m/metx_liver_met/Haffner_Transfer_06012026/TMA111A_prostate
+output_dir:    /fh/fast/setty_m/user/ryang/xenium_bundle_subset_test/a1_run
+
+# Optional override — usually left unset (read from experiment.xenium).
+# pixel_size_morph: 0.2125
+
+rois:
+  # Verified frames on the design thread:
+  #   - QuPath CSV       → microns
+  #   - QuPath GeoJSON   → dapi_px  (µm × 1/pixel_size_morph)
+  #   - Xenium Explorer  → NOT YET EMPIRICALLY VERIFIED (likely microns)
+  - name: TopSubset
+    path: /fh/fast/setty_m/user/ryang/xenium_bundle_subset_test/bladder_TMA_TopSubset.geojson
+    frame: dapi_px
+    source_tool: qupath_geojson
+
+  - name: BottomSubset
+    path: /fh/fast/setty_m/user/ryang/xenium_bundle_subset_test/bladder_TMA_BottomSubset.csv
+    frame: microns
+    source_tool: qupath_csv
+
+outputs:
+  dapi_crop:          true
+  dapi_polygon_mask:  false      # requires rasterio; opt-in
+  cells_parquet:      true
+  cell_boundaries:    true
+  nucleus_boundaries: true
+  experiment_xenium:  true
+  geometry_frame:     global     # global | local

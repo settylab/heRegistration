@@ -49,6 +49,9 @@ dependencies = [
     "distributed",
     "openslide-python",
     "tifffile",
+    # A1's DAPI crop uses tifffile.TiffPage.aszarr() → zarr slice to
+    # decode only the tiles overlapping the ROI bbox (bounded memory).
+    "zarr",
     "anndata",
     "scanpy",
     # OpenCV: MUST be `opencv-contrib-python` (NOT stock `opencv-python`).
