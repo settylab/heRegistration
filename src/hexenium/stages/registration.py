@@ -120,8 +120,9 @@ def run_registration(
     apply_numpy_shims()
     from valis_hest import preprocessing, registration  # type: ignore
     from valis_hest.slide_io import BioFormatsSlideReader  # type: ignore
-    from hest.SlideReaderAdapter import SlideReaderAdapter  # type: ignore
     from hest.utils import get_name_datetime  # type: ignore
+
+    from hexenium._internal.he_slide_reader import OMEAwareSlideReaderAdapter
 
     if micro_rigid_registrar_params is None:
         micro_rigid_registrar_params = {}
@@ -241,7 +242,11 @@ def run_registration(
 
     register_kwargs = {
         "reader_dict": {
-            str(he_for_valis): [SlideReaderAdapter],
+            # H&E: OME-aware wrapper of HEST's SlideReaderAdapter — reads
+            # the source OME PhysicalSize instead of the hard-coded
+            # [0.25, 0.25, PIXEL_UNIT] default that would misscale any
+            # scanner not natively at 0.25 µm/px.
+            str(he_for_valis): [OMEAwareSlideReaderAdapter],
             str(dapi_path): [BioFormatsSlideReader],
         },
     }

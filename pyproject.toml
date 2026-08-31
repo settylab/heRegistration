@@ -49,6 +49,9 @@ dependencies = [
     "distributed",
     "openslide-python",
     "tifffile",
+    # OME-XML parsing for OMEAwareSlideReaderAdapter — reads the H&E
+    # scan's PhysicalSize instead of HEST's hard-coded 0.25 default.
+    "ome-types",
     "anndata",
     "scanpy",
     # OpenCV: MUST be `opencv-contrib-python` (NOT stock `opencv-python`).
