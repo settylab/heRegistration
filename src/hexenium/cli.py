@@ -359,7 +359,7 @@ def _resolve_config(args: argparse.Namespace) -> dict:
     # warp, viz, he_preprocess don't. So the existence check is required
     # only when celltype is in --stages — otherwise register+warp can run
     # before the upstream step-1 has produced the h5ad, and identity
-    # comes from the CLI args via _resolve_integrated_by_run_id.
+    # comes from the CLI args via _resolve_by_run_id.
     if args.run_id and not cfg.get("xenium_h5ad"):
         sid = cfg.get("sample_id")
         oroot = cfg.get("output_root")

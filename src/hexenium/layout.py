@@ -1,24 +1,30 @@
 """Output layout for the hexenium pipeline.
 
-Three invocation modes:
+Invocation modes, in precedence order (highest first):
 
-- **standalone** — driven by ``--sample-id`` + ``--output-root``. Outputs
-  land at ``<output_root>/<sample_id>/{logs,converted,register,...}``.
+- **integrated-by-run-id** — driven by the CLI trio ``--sample-id`` +
+  ``--run-id`` + ``--output-root``. Outputs land under
+  ``<output_root>/<sample_id>/<sample_id>_<run_id>/he_registration/``.
+  Identity comes from the CLI args. This mode is chosen even when
+  ``--xenium-h5ad`` is ALSO provided — the h5ad is then consumed as an
+  INPUT reference (celltype reads its ``.uns``) but does NOT drive the
+  output location, and its ``.uns['run_id']`` is not required to match
+  ``--run-id`` (WARN on mismatch, not fail). This is the supported
+  workflow for reusing an upstream h5ad under a new downstream run-id.
 
-- **integrated-by-h5ad** — driven by ``--xenium-h5ad`` pointing at the
-  xenium h5ad written by an upstream xenium-preprocess pipeline. Sample
-  identity comes from ``.uns['sample_id']`` + ``.uns['run_id']`` on that
-  h5ad; the H&E-reg run dir is derived from the h5ad's on-disk location
-  (``h5ad.parent.parent``) and outputs are colocated under
-  ``<run_dir>/he_registration/{logs,converted,...}``.
+- **integrated-by-h5ad** — driven by ``--xenium-h5ad`` alone (no CLI
+  trio). Sample identity comes from ``.uns['sample_id']`` +
+  ``.uns['run_id']`` on that h5ad; the H&E-reg run dir is derived from
+  the h5ad's on-disk location (``h5ad.parent.parent``) and outputs are
+  colocated under ``<run_dir>/he_registration/{logs,converted,...}``.
+  Preserved as a fallback for callers that haven't opted into the
+  explicit CLI-driven layout.
 
-- **integrated-by-run-id** — driven by ``--sample-id`` + ``--run-id`` +
-  ``--output-root``. Same colocated layout as integrated-by-h5ad, but
-  without reading the h5ad (identity comes from the CLI args). Lets
-  stages that don't need the h5ad content (register, warp) run before
-  the upstream step-1 has produced it.
+- **standalone** — driven by ``--sample-id`` + ``--output-root``
+  without a ``--run-id``. Outputs land at
+  ``<output_root>/<sample_id>/{logs,converted,register,...}``.
 
-In BOTH modes the internal layout under the top-level output dir is
+In every mode the internal layout under the top-level output dir is
 identical:
 
     <output_root_he>/
@@ -54,6 +60,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,18 +216,25 @@ def resolve_layout(
 ) -> RunLayout:
     """Pick the right layout for the invocation.
 
-    Three modes:
+    Precedence (highest first):
 
-    * ``xenium_h5ad`` given → integrated mode: read
-      ``.uns['sample_id']`` + ``.uns['run_id']`` and colocate outputs
-      under ``<xenium_run_dir>/he_registration/``.
-    * ``xenium_h5ad`` absent AND ``sample_id + output_root + run_id`` all
-      given → integrated-by-run-id: construct the same colocation without
-      touching the h5ad. Lets stages that don't need the h5ad content
-      (register, warp) run before the upstream step-1 has produced it —
-      identity comes from the CLI args, no ``.uns`` validation.
-    * Otherwise → standalone mode driven by ``sample_id + output_root``,
-      outputs at ``<output_root>/<sample_id>/``.
+    1. **Explicit CLI trio** — ``sample_id + run_id + output_root``
+       all provided. The trio is the authority for the output
+       location. If ``xenium_h5ad`` is ALSO provided, it becomes an
+       INPUT reference (celltype reads its ``.uns``); its on-disk
+       location does NOT drive the output layout, and its
+       ``.uns['run_id']`` is not required to match ``--run-id`` (a
+       mismatch is WARNED, not raised, to support reusing an
+       upstream h5ad under a new downstream run-id). The
+       ``.uns['sample_id']`` cross-check IS retained — a mismatch
+       here almost always means the wrong h5ad path was passed.
+    2. **h5ad-only** — ``xenium_h5ad`` supplied without an explicit
+       trio. Read ``.uns['sample_id']`` + ``.uns['run_id']`` and
+       colocate outputs under ``<xenium_run_dir>/he_registration/``.
+       Preserves the pre-precedence-fix behavior for callers that
+       haven't opted into the CLI-driven layout.
+    3. **Standalone** — ``sample_id + output_root`` without a
+       ``--run-id``. Outputs land at ``<output_root>/<sample_id>/``.
 
     ``stages``: when passed, becomes the logs-folder suffix (see
     :func:`compute_stages_suffix`). When absent, ``logs_dir`` falls back
@@ -228,6 +242,22 @@ def resolve_layout(
     compatibility with test callers.
     """
     stages_suffix = compute_stages_suffix(stages) if stages is not None else ""
+
+    # (1) Explicit CLI trio wins — even when xenium_h5ad is also
+    # supplied. The h5ad, when given, is consumed as an input
+    # reference; it does NOT drive the output location.
+    if run_id and sample_id and output_root is not None:
+        return _resolve_by_run_id(
+            sample_id=sample_id,
+            run_id=run_id,
+            output_root=Path(output_root),
+            xenium_h5ad=Path(xenium_h5ad) if xenium_h5ad else None,
+            he_job_id=he_job_id,
+            stages_suffix=stages_suffix,
+        )
+
+    # (2) No explicit trio → h5ad-authoritative layout when a h5ad
+    # is provided (existing behavior, preserved as fallback).
     if xenium_h5ad is not None:
         return _resolve_integrated(
             sample_id=sample_id,
@@ -235,14 +265,8 @@ def resolve_layout(
             he_job_id=he_job_id,
             stages_suffix=stages_suffix,
         )
-    if run_id and sample_id and output_root is not None:
-        return _resolve_integrated_by_run_id(
-            sample_id=sample_id,
-            run_id=run_id,
-            output_root=Path(output_root),
-            he_job_id=he_job_id,
-            stages_suffix=stages_suffix,
-        )
+
+    # (3) Standalone.
     if not sample_id or output_root is None:
         raise SystemExit(
             "one of the two invocation modes must be complete: pass "
@@ -259,31 +283,74 @@ def resolve_layout(
     )
 
 
-def _resolve_integrated_by_run_id(
+def _resolve_by_run_id(
     *,
     sample_id: str,
     run_id: str,
     output_root: Path,
+    xenium_h5ad: Path | None,
     he_job_id: str,
     stages_suffix: str = "",
 ) -> RunLayout:
-    """Integrated mode without an h5ad: identity comes from CLI args.
+    """Integrated-layout resolver driven by the CLI trio.
 
-    Layout matches ``_resolve_integrated`` — outputs land under
-    ``<output_root>/<sample_id>/<sample_id>_<run_id>/he_registration/`` —
-    but no ``.uns`` read, so this succeeds before the upstream step-1 has
-    written the h5ad. The celltype stage will still need the h5ad at
-    run-time; other stages don't.
+    Layout: outputs land under
+    ``<output_root>/<sample_id>/<sample_id>_<run_id>/he_registration/``.
+
+    When ``xenium_h5ad`` is ``None``, no h5ad is read — identity
+    comes from the CLI args. This lets stages that don't need the
+    h5ad content (register, warp) run before the upstream step-1
+    has produced it. The celltype stage will fail at run-time if
+    the h5ad doesn't exist by then.
+
+    When ``xenium_h5ad`` IS supplied, it is consumed as an INPUT
+    reference (celltype reads ``.uns``), NOT as the authority for
+    the output location. Two validations run:
+
+    * Hard fail if ``.uns['sample_id']`` disagrees with the
+      ``--sample-id`` CLI arg — defends against passing the wrong
+      h5ad path by accident.
+    * WARN (not fail) if ``.uns['run_id']`` disagrees with the
+      ``--run-id`` CLI arg — this is a supported workflow: reuse
+      an upstream h5ad (same sample) under a new downstream run-id
+      (e.g. re-registering under a distinct experiment tag while
+      sharing the same expression matrix).
     """
     run_dir = (Path(output_root).resolve() / sample_id
                / f"{sample_id}_{run_id}")
+
+    resolved_h5ad: Path | None = None
+    if xenium_h5ad is not None:
+        h5ad = Path(xenium_h5ad).resolve()
+        if not h5ad.exists():
+            raise SystemExit(f"--xenium-h5ad path does not exist: {h5ad}")
+        uns_sid, uns_rid = _read_uns_identity(h5ad)
+        if uns_sid and uns_sid != sample_id:
+            raise SystemExit(
+                f"--sample-id {sample_id!r} disagrees with --xenium-h5ad's "
+                f".uns['sample_id']={uns_sid!r}. Fix one of the two — "
+                "this cross-check defends against passing the wrong "
+                "h5ad path by accident."
+            )
+        if uns_rid and uns_rid != run_id:
+            print(
+                f"[layout] WARN: --xenium-h5ad .uns['run_id']={uns_rid!r} "
+                f"differs from --run-id {run_id!r}. Using the CLI trio "
+                f"for output layout; the h5ad is consumed as an input "
+                f"reference only. This is the supported workflow for "
+                f"reusing an upstream h5ad under a new downstream run-id.",
+                file=sys.stderr,
+                flush=True,
+            )
+        resolved_h5ad = h5ad
+
     return RunLayout(
         sample_id=sample_id,
         he_job_id=he_job_id,
         output_root_he=run_dir / "he_registration",
         integrated=True,
         xenium_run_id=run_id,
-        xenium_h5ad=None,
+        xenium_h5ad=resolved_h5ad,
         xenium_run_dir=run_dir,
         stages_suffix=stages_suffix,
     )

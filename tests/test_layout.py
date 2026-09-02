@@ -463,9 +463,92 @@ class TestResolveLayoutIntegratedByRunId:
                     / "spatial_adata").exists()
         assert layout.output_root_he.name == "he_registration"
 
-    def test_h5ad_wins_over_run_id_when_both_present(self, tmp_path):
-        # If a real h5ad is passed, we take the .uns route even if
-        # run_id was also given — the .uns is the source of truth.
+    def test_explicit_trio_wins_over_h5ad_when_both_present(self, tmp_path):
+        # Precedence: explicit CLI trio (sample_id + run_id + output_root)
+        # wins over the h5ad-derived layout, even when --xenium-h5ad is
+        # also supplied. The h5ad is consumed as an INPUT reference; the
+        # trio drives the output location.
+        upstream_run_dir = tmp_path / "SAMPLE1" / "SAMPLE1_upstream_run42"
+        h5ad = (upstream_run_dir / "spatial_adata"
+                / "SAMPLE1_xenium_ranger.h5ad")
+        _write_test_h5ad(h5ad, sample_id="SAMPLE1", run_id="upstream_run42")
+
+        downstream_root = tmp_path / "downstream"
+        layout = resolve_layout(
+            sample_id="SAMPLE1",
+            output_root=downstream_root,
+            xenium_h5ad=h5ad,
+            he_job_id="he-1",
+            run_id="demo_v1",   # downstream run-id — wins over h5ad's
+        )
+        expected_run_dir = (downstream_root.resolve() / "SAMPLE1"
+                            / "SAMPLE1_demo_v1")
+        assert layout.integrated is True
+        assert layout.xenium_run_id == "demo_v1"
+        assert layout.xenium_run_dir == expected_run_dir
+        assert layout.output_root_he == expected_run_dir / "he_registration"
+        # h5ad still recorded so downstream celltype can read it.
+        assert layout.xenium_h5ad == h5ad.resolve()
+
+    def test_hybrid_mode_run_id_mismatch_warns_not_raises(
+        self, tmp_path, capsys,
+    ):
+        # Supported workflow: reuse an upstream h5ad under a new
+        # downstream run-id. .uns['run_id'] disagreement produces a
+        # WARN, not a hard fail.
+        upstream_run_dir = tmp_path / "SAMPLE1" / "SAMPLE1_upstream_run42"
+        h5ad = (upstream_run_dir / "spatial_adata"
+                / "SAMPLE1_xenium_ranger.h5ad")
+        _write_test_h5ad(h5ad, sample_id="SAMPLE1", run_id="upstream_run42")
+
+        layout = resolve_layout(
+            sample_id="SAMPLE1",
+            output_root=tmp_path,
+            xenium_h5ad=h5ad,
+            he_job_id="he-1",
+            run_id="downstream_v1",
+        )
+        # No raise; layout constructed from trio.
+        assert layout.xenium_run_id == "downstream_v1"
+        # WARN emitted to stderr for operator visibility.
+        captured = capsys.readouterr()
+        assert "WARN" in captured.err
+        assert "upstream_run42" in captured.err
+        assert "downstream_v1" in captured.err
+
+    def test_hybrid_mode_sample_id_mismatch_still_raises(self, tmp_path):
+        # Sample-id disagreement almost always means the wrong h5ad path
+        # was passed. Keep this cross-check as a hard fail — even in
+        # hybrid mode where run_id mismatch is tolerated.
+        run_dir = tmp_path / "SAMPLE1" / "SAMPLE1_run42"
+        h5ad = run_dir / "spatial_adata" / "SAMPLE1_xenium_ranger.h5ad"
+        _write_test_h5ad(h5ad, sample_id="SAMPLE1", run_id="run42")
+        with pytest.raises(SystemExit, match="disagrees with"):
+            resolve_layout(
+                sample_id="WRONG_SAMPLE",
+                output_root=tmp_path,
+                xenium_h5ad=h5ad,
+                he_job_id="he-1",
+                run_id="downstream_v1",
+            )
+
+    def test_hybrid_mode_missing_h5ad_raises(self, tmp_path):
+        # h5ad path must exist when consumed as an input reference.
+        # (This is the same guard as the h5ad-only path, hit via
+        # the hybrid dispatch.)
+        missing = tmp_path / "does_not_exist.h5ad"
+        with pytest.raises(SystemExit, match="does not exist"):
+            resolve_layout(
+                sample_id="SAMPLE1",
+                output_root=tmp_path,
+                xenium_h5ad=missing,
+                he_job_id="he-1",
+                run_id="downstream_v1",
+            )
+
+    def test_hybrid_mode_all_matching_no_warn(self, tmp_path, capsys):
+        # Happy path: trio matches the h5ad's .uns exactly. Layout
+        # constructed from trio; xenium_h5ad populated; no WARN.
         run_dir = tmp_path / "SAMPLE1" / "SAMPLE1_run42"
         h5ad = run_dir / "spatial_adata" / "SAMPLE1_xenium_ranger.h5ad"
         _write_test_h5ad(h5ad, sample_id="SAMPLE1", run_id="run42")
@@ -474,7 +557,9 @@ class TestResolveLayoutIntegratedByRunId:
             output_root=tmp_path,
             xenium_h5ad=h5ad,
             he_job_id="he-1",
-            run_id="demo_v1",   # would-be conflict, ignored
+            run_id="run42",   # matches .uns
         )
         assert layout.xenium_run_id == "run42"
-        assert layout.xenium_run_dir == run_dir.resolve()
+        assert layout.xenium_h5ad == h5ad.resolve()
+        captured = capsys.readouterr()
+        assert "WARN" not in captured.err
