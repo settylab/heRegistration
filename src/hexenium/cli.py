@@ -352,14 +352,24 @@ def _resolve_config(args: argparse.Namespace) -> dict:
 
     cfg = deep_update(cfg, overrides)
 
-    # If --run-id was passed without --xenium-h5ad, derive the h5ad path
-    # from the canonical upstream xenium-preprocess layout:
+    # Persist --run-id in cfg unconditionally. It is a first-class
+    # layout input that pipeline.py forwards to resolve_layout, whose
+    # trio-precedence branch (--sample-id + --run-id + --output-root)
+    # applies EVEN when --xenium-h5ad is also supplied. Gating this
+    # persistence on the absence of --xenium-h5ad (as we previously
+    # did) meant the trio branch was silently unreachable in the
+    # hybrid mode, so outputs still landed at the h5ad-derived path.
+    if args.run_id:
+        cfg["run_id"] = args.run_id
+
+    # If --run-id was passed without --xenium-h5ad, ALSO derive the
+    # h5ad path from the canonical upstream xenium-preprocess layout:
     #     <output_root>/<sample>/<sample>_<run_id>/spatial_adata/<sample>_xenium_ranger.h5ad
     # Only the celltype stage actually reads the h5ad's content; register,
     # warp, viz, he_preprocess don't. So the existence check is required
     # only when celltype is in --stages — otherwise register+warp can run
     # before the upstream step-1 has produced the h5ad, and identity
-    # comes from the CLI args via _resolve_integrated_by_run_id.
+    # comes from the CLI args via _resolve_by_run_id.
     if args.run_id and not cfg.get("xenium_h5ad"):
         sid = cfg.get("sample_id")
         oroot = cfg.get("output_root")
@@ -370,7 +380,6 @@ def _resolve_config(args: argparse.Namespace) -> dict:
             )
         derived = (Path(oroot) / sid / f"{sid}_{args.run_id}"
                    / "spatial_adata" / f"{sid}_xenium_ranger.h5ad")
-        cfg["run_id"] = args.run_id  # for resolve_layout no-h5ad branch
         if derived.exists():
             cfg["xenium_h5ad"] = str(derived)
         elif "celltype" in args.stages:
