@@ -30,11 +30,66 @@ from hexenium.manifest import (
 )
 
 
+# Image containers we recognise as valid H&E inputs. Ordered
+# longest-first so `.ome.tif` matches before plain `.tif`. Matched
+# case-insensitively; the canonical suffix returned is always the
+# lowercase form.
+#
+# Why an explicit whitelist rather than `"".join(he_path.suffixes)`:
+# `pathlib.Path.suffixes` treats every dot as a separator, so a
+# middle-dot in the source filename (e.g.
+# `MH9_0088754_SR25-1407.40x_BF_01.ome.tif` →
+# `['.40x_BF_01', '.ome', '.tif']`) gets stitched into the canonical
+# name (`aligned_fullres_HE.40x_BF_01.ome.tif`). valis_hest's
+# post-register step then keys `slide_dict['aligned_fullres_HE']`
+# (registration.py:4644 in valis_hest) and KeyErrors after otherwise
+# successful registration.
+_KNOWN_HE_SUFFIXES = (
+    ".ome.tif",
+    ".ome.tiff",
+    ".ome.btf",
+    ".qptiff",
+    ".tif",
+    ".tiff",
+    ".btf",
+    ".svs",
+    ".ndpi",
+    ".mrxs",
+    ".scn",
+)
+
+
+def _canonical_he_suffix(name: str) -> str:
+    """Return the canonical (lowercase) image suffix for ``name``.
+
+    Case-insensitive match against ``_KNOWN_HE_SUFFIXES`` (longest
+    first). Raises ``ValueError`` on an unrecognised extension —
+    guessing would silently poison valis_hest's slide-dict lookup, so
+    failing loud here is strictly safer.
+    """
+    lower = name.lower()
+    for suf in _KNOWN_HE_SUFFIXES:
+        if lower.endswith(suf):
+            return suf
+    raise ValueError(
+        f"H&E filename {name!r} has no recognised image suffix. "
+        f"Known suffixes: {list(_KNOWN_HE_SUFFIXES)}. Rename the input "
+        f"or extend _KNOWN_HE_SUFFIXES in "
+        f"hexenium.stages.registration."
+    )
+
+
 def _canonical_he_symlink(he_path: Path, workdir: Path) -> Path:
     """Create a symlink named aligned_fullres_HE.<ext> pointing at he_path.
-    Returns the symlink path."""
+
+    ``<ext>`` is the longest known image suffix from
+    ``_canonical_he_suffix``, so middle-dot filenames (e.g.
+    ``MH9_0088754_SR25-1407.40x_BF_01.ome.tif``) still collapse to
+    ``aligned_fullres_HE.ome.tif`` — the name valis_hest expects for
+    its slide-dict key. Returns the symlink path.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
-    suffix = "".join(he_path.suffixes) or ".ome.tif"
+    suffix = _canonical_he_suffix(he_path.name)
     canonical = workdir / f"aligned_fullres_HE{suffix}"
     if canonical.exists() or canonical.is_symlink():
         canonical.unlink()
